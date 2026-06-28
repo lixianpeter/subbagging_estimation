@@ -1,298 +1,200 @@
-Simu <- function(a) {
+SubbaggingCore <- function(data, k_N, m_N, y_name = "y", model = "Linear") {
   
-  library(MASS)
-  library(glmnet)
-  ## Input Parameters
-  id <- a
-  list <- read.csv("Paralist.csv", stringsAsFactors = FALSE)
+  ############################################################
+  ## data:  data frame containing response y and covariates x
+  ## k_N:   subsample size
+  ## m_N:   number of subsamples
+  ## model: "Linear" or "Logistic"
+  ############################################################
   
-  para <- list[id, ]
+  y <- data[[y_name]]
+  x <- as.matrix(data[, setdiff(names(data), y_name)])
   
-  model <- as.character(para$model)
-  p <- para$p
-  N <- para$N
-  delta <- para$delta
-  alpha <- para$alpha
-  SNR <- para$SNR
-  p0 <- 4
+  N <- nrow(x)
+  p <- ncol(x)
   
-  LoopStart <- para$LoopStart
-  LoopEnd <- para$LoopEnd
+  ############################################################
+  ## 1. Solve original estimating equation
+  ############################################################
   
-  rm(list, para)
-  
-  if(model == 'Linear'){
-    filename1 <- file.path("result", paste0(model, "_SNR", SNR, "_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
-    filename2 <- file.path("result", paste0(model, "_loglogp_SNR", SNR, "_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
-    filename3 <- file.path("result", paste0(model, "_dflambda_SNR", SNR, "_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
-    filename4 <- file.path("result", paste0(model, "_loglogp_dflambda_SNR", SNR, "_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
-  }else{
-    filename1 <- file.path("result", paste0(model, "_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
-    filename2 <- file.path("result", paste0(model, "_loglogp_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
-    filename3 <- file.path("result", paste0(model, "_dflambda_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
-    filename4 <- file.path("result", paste0(model, "_loglogp_dflambda_p", p, "_N", sprintf("%.0f", N), "_delta", sprintf("%.2f", delta), "_alpha", alpha, ".csv"))
+  fit_original <- function(x_sub, y_sub) {
+    
+    if (model == "Linear") {
+      beta_hat <- solve(t(x_sub) %*% x_sub) %*% t(x_sub) %*% y_sub
+      beta_hat <- as.numeric(beta_hat)
+    }
+    
+    if (model == "Logistic") {
+      fit <- glm(y_sub ~ x_sub - 1, family = binomial(link = "logit"))
+      beta_hat <- as.numeric(coef(fit))
+    }
+    
+    return(beta_hat)
   }
-  beta_true <- c(seq(-1, -0.5, length.out = p0/2), seq(0.5, 1, length.out = p0/2), rep(0, p - p0))
   
-  for (loop in LoopStart:LoopEnd) {
-    set.seed(loop)
+  ############################################################
+  ## 2. Compute psi, V, and estimated bias B_hat
+  ############################################################
+  
+  get_quantities <- function(x_sub, y_sub, beta) {
     
-    rho <- 0.5
-    idx <- 0:(p - 1)
+    k <- nrow(x_sub)
     
-    Sigma <- rho ^ abs(outer(idx, idx, "-"))
-    
-    ## Generate correlated covariates
-    x <- mvrnorm(
-      n = N,
-      mu = rep(0, p),
-      Sigma = Sigma
-    )   # N x p
-    
-    e_sigma <- t(beta_true) %*% Sigma %*% beta_true / SNR
-      
     if (model == "Linear") {
       
-      # code for Linear model
-      error <- rnorm(n = N, mean = 0, sd = sqrt(e_sigma))
-      y <- x %*% beta_true + error
+      ## psi_i(beta) = x_i (y_i - x_i^T beta)
+      residual <- as.numeric(y_sub - x_sub %*% beta)
+      psi <- x_sub * residual
       
-    } else {
+      ## V = average derivative of psi
+      V <- -t(x_sub) %*% x_sub / k
       
-      # code for non-Linear model
-      y <- rbinom(n = N, 1, plogis(x %*% beta_true))
+      ## For linear regression, second derivative is zero
+      second_part <- rep(0, p)
+      
+      ## a_i = V^{-1} psi_i
+      A <- t(solve(V, t(psi)))   # k by p
+      
+      ## D_i a_i = - x_i x_i^T a_i
+      xa <- rowSums(x_sub * A)
+      D_a <- -x_sub * xa
+      
+      first_part <- -colMeans(D_a - psi)
     }
     
-    beta_subsample_list <- list()
-    second_derivative_subsample_list <- list()
-    Sigma_hat_variance_subsample_list <- list()
-    V_subsample_list <- list()
-    
-    kn <- floor(N^(1/2+delta))
-    mn <- floor(alpha*N/kn)
-    
-    t0 <- Sys.time()  
-    for (i in 1:mn) {
+    if (model == "Logistic") {
       
-      subsample_idx <- sample(N, size = kn, replace = FALSE)
+      eta <- as.numeric(x_sub %*% beta)
+      prob <- 1 / (1 + exp(-eta))
+      w <- prob * (1 - prob)
       
-      y_subsample <- y[subsample_idx]
-      x_subsample <- x[subsample_idx,]
+      ## psi_i(beta) = x_i (y_i - p_i)
+      psi <- x_sub * as.numeric(y_sub - prob)
       
+      ## V = average derivative of psi
+      V <- -t(x_sub) %*% (x_sub * w) / k
       
-      if (model == "Linear") {
-        
-        # code for Linear model
-        beta_subsample <- solve(t(x_subsample) %*% x_subsample) %*% t(x_subsample) %*% y_subsample
-        second_derivative_subsample <- 2 * t(x_subsample) %*% x_subsample / kn
-        grad <- -2 * x_subsample * matrix(y_subsample - x_subsample %*% beta_subsample, nrow=kn, ncol=p, byrow = FALSE)
-        Sigma_hat_variance_subsample <- t(grad) %*% grad / kn
-        
-      } else {
-        
-        fit <- glm(y_subsample ~ x_subsample -1, family = binomial(link = "logit"))
-        beta_subsample <- as.numeric(coef(fit)) 
-        
-        prob <- plogis(x_subsample %*% beta_subsample) 
-        second_derivative_subsample <- t(x_subsample) %*% diag(as.numeric(prob * (1 - prob))) %*% x_subsample / kn
-        grad <- x_subsample *  matrix(prob - y_subsample, nrow=kn, ncol=p, byrow = FALSE)
-        Sigma_hat_variance_subsample <- t(grad) %*% grad / kn
-        
-      }
+      ## a_i = V^{-1} psi_i
+      A <- t(solve(V, t(psi)))   # k by p
       
-      beta_subsample_list[[i]] <- beta_subsample
-      second_derivative_subsample_list[[i]] <- second_derivative_subsample
-      Sigma_hat_variance_subsample_list[[i]] <- Sigma_hat_variance_subsample
+      ## D_i a_i = - w_i x_i x_i^T a_i
+      xa <- rowSums(x_sub * A)
+      D_a <- -x_sub * as.numeric(w * xa)
+      
+      first_part <- -colMeans(D_a - psi)
+      
+      ## second derivative part
+      second_part <- -0.5 * colMeans(
+        x_sub * as.numeric(w * (1 - 2 * prob) * xa^2)
+      )
     }
     
-    beta_average <- Reduce("+", beta_subsample_list) / mn
-    # LSA <- Reduce(
-    #   `+`,
-    #   Map(
-    #     function(beta_i, H_i) {
-    #       diff <- beta_average - beta_i
-    #       as.numeric(t(diff) %*% H_i %*% diff)
-    #     },
-    #     beta_subsample_list,
-    #     second_derivative_subsample_list
-    #   )
-    # ) / m_N
+    ## Estimated bias term B_hat
+    B_hat <- -solve(V, first_part + second_part)
+    B_hat <- as.numeric(B_hat)
     
-    # BIC_min = k_N * LSA + df * log(N)
-    
-    alpha0 = (kn * mn)/N 
-    
-    glm_X=NULL
-    glm_Y=NULL
-    for (k in seq_len(mn)) {
-      #Vk_half <- chol(second_derivative_subsample_list[[k]])
-      eig <- eigen(second_derivative_subsample_list[[k]])
-      
-      Vk_half <- eig$vectors %*%
-        diag(sqrt(eig$values)) %*%
-        t(eig$vectors)
-      
-      glm_Y <- rbind(glm_Y, Vk_half%*%beta_subsample_list[[k]])
-      glm_X <-rbind(glm_X, Vk_half)
-    }
-    glm_X=glm_X/sqrt(mn)
-    glm_Y=glm_Y/sqrt(mn)
-    cy = sd(glm_Y)*sqrt(length(glm_Y)-1)/sqrt(length(glm_Y))
-    
-    gridLambda=10^seq(0,log10(log(N)/N*1e-1),length=100)
-    glmnet_fit <- glmnet(glm_X/cy, glm_Y/cy,
-                         family = "gaussian", 
-                         alpha=1, 
-                         standardize= FALSE, 
-                         intercept = FALSE, 
-                         penalty.factor= 1/(abs(beta_average)/cy^2/2/length(glm_Y)),
-                         lambda=gridLambda)
-    
-    beta_hat = predict(glmnet_fit,type="coefficients")[-1, ]
-    
-    BIC_vec <- apply(beta_hat, 2, FUN = function(x) {
-      
-      df <- sum(x != 0)
-      LSA <- 0
-      
-      for (k in seq_len(mn)) {
-        diff <- x - beta_subsample_list[[k]]
-        LSA <- LSA +
-          as.numeric(
-            t(diff) %*%
-              second_derivative_subsample_list[[k]] %*%
-              diff
-          )
-      }
-      LSA <- LSA/mn
-      kn * LSA + df * log(N)
-    })
-    
-    
-    beta_hat_optimal  = beta_hat[,which.min(BIC_vec)]    
-    lambda_min  = glmnet_fit$lambda[which.min(BIC_vec)]
-    BIC_min  = min(BIC_vec)   
-    
-    Sigma_hat <- Reduce("+", Sigma_hat_variance_subsample_list) / mn
-    V_hat <- Reduce("+", second_derivative_subsample_list) / mn
-    
-    SE_hat <- sqrt(diag((1 + 1 / alpha0) / N * solve(V_hat[1:p0, 1:p0]) %*% Sigma_hat[1:p0, 1:p0] %*% solve(V_hat[1:p0, 1:p0])))
-    
-    CI_indicator <- as.numeric((beta_hat_optimal[1:p0] + qnorm(0.975) * SE_hat > beta_true[1:p0]) & (beta_hat_optimal[1:p0] - qnorm(0.975) * SE_hat < beta_true[1:p0]))
-    
-    time <- as.numeric(Sys.time() - t0, units = "secs")
-    
-    result <- c(loop, beta_hat_optimal, SE_hat, CI_indicator, BIC_min, lambda_min, time)
-    
-    write.table(t(result), filename1, sep = ",", row.names = FALSE, col.names = FALSE, append = TRUE)
-  
-    
-    BIC_vec_loglogp <- apply(beta_hat, 2, FUN = function(x) {
-      
-      df <- sum(x != 0)
-      LSA <- 0
-      
-      for (k in seq_len(mn)) {
-        diff <- x - beta_subsample_list[[k]]
-        LSA <- LSA +
-          as.numeric(
-            t(diff) %*%
-              second_derivative_subsample_list[[k]] %*%
-              diff
-          )
-      }
-      
-      ## My changes
-      LSA <- LSA/mn
-      
-      ## My changes
-      kn * LSA + df * log(N) * log(log(p))
-    })
-    
-    beta_hat_optimal_loglogp  = beta_hat[,which.min(BIC_vec_loglogp)]    
-    
-    lambda_min_loglogp  = glmnet_fit$lambda[which.min(BIC_vec_loglogp)]
-    
-    BIC_min_loglogp  = min(BIC_vec_loglogp)  
-    
-    CI_indicator_loglogp <- as.numeric((beta_hat_optimal_loglogp[1:p0] + qnorm(0.975) * SE_hat > beta_true[1:p0]) & (beta_hat_optimal_loglogp[1:p0] - qnorm(0.975) * SE_hat < beta_true[1:p0]))
-    
-    result <- c(loop, beta_hat_optimal_loglogp, SE_hat, CI_indicator_loglogp, BIC_min_loglogp, lambda_min_loglogp, time)
-    
-    write.table(t(result), filename2, sep = ",", row.names = FALSE, col.names = FALSE, append = TRUE)
-    
-    
-    glmnet_fit <- glmnet(glm_X/cy, glm_Y/cy,
-                         family = "gaussian", 
-                         alpha=1, 
-                         standardize= FALSE, 
-                         intercept = FALSE, 
-                         penalty.factor= 1/(abs(beta_average)/cy^2/2/length(glm_Y)))
-    
-    beta_hat = predict(glmnet_fit,type="coefficients")[-1, ]
-    
-    BIC_vec <- apply(beta_hat, 2, FUN = function(x) {
-      
-      df <- sum(x != 0)
-      LSA <- 0
-      
-      for (k in seq_len(mn)) {
-        diff <- x - beta_subsample_list[[k]]
-        LSA <- LSA +
-          as.numeric(
-            t(diff) %*%
-              second_derivative_subsample_list[[k]] %*%
-              diff
-          )
-      }
-      LSA <- LSA/mn
-      kn * LSA + df * log(N)
-    })
-    
-    
-    beta_hat_optimal_dflambda  = beta_hat[,which.min(BIC_vec)]    
-    lambda_min_dflambda  = glmnet_fit$lambda[which.min(BIC_vec)]
-    BIC_min_dflambda  = min(BIC_vec)   
-    
-    CI_indicator_dflambda <- as.numeric((beta_hat_optimal_dflambda[1:p0] + qnorm(0.975) * SE_hat > beta_true[1:p0]) & (beta_hat_optimal_dflambda[1:p0] - qnorm(0.975) * SE_hat < beta_true[1:p0]))
-    
-    result <- c(loop, beta_hat_optimal_dflambda, SE_hat, CI_indicator_dflambda, BIC_min_dflambda, lambda_min_dflambda, time)
-    
-    write.table(t(result), filename3, sep = ",", row.names = FALSE, col.names = FALSE, append = TRUE)
-    
-    
-    BIC_vec_loglogp_dflambda <- apply(beta_hat, 2, FUN = function(x) {
-      
-      df <- sum(x != 0)
-      LSA <- 0
-      
-      for (k in seq_len(mn)) {
-        diff <- x - beta_subsample_list[[k]]
-        LSA <- LSA +
-          as.numeric(
-            t(diff) %*%
-              second_derivative_subsample_list[[k]] %*%
-              diff
-          )
-      }
-      
-      ## My changes
-      LSA <- LSA/mn
-      
-      ## My changes
-      kn * LSA + df * log(N) * log(log(p))
-    })
-    
-    beta_hat_optimal_loglogp_dflambda  = beta_hat[,which.min(BIC_vec_loglogp_dflambda)]    
-    
-    lambda_min_loglogp_dflambda  = glmnet_fit$lambda[which.min(BIC_vec_loglogp_dflambda)]
-    
-    BIC_min_loglogp_dflambda  = min(BIC_vec_loglogp_dflambda)  
-    
-    CI_indicator_loglogp_dflambda <- as.numeric((beta_hat_optimal_loglogp_dflambda[1:p0] + qnorm(0.975) * SE_hat > beta_true[1:p0]) & (beta_hat_optimal_loglogp_dflambda[1:p0] - qnorm(0.975) * SE_hat < beta_true[1:p0]))
-    
-    result <- c(loop, beta_hat_optimal_loglogp_dflambda, SE_hat, CI_indicator_loglogp_dflambda, BIC_min_loglogp_dflambda, lambda_min_loglogp_dflambda, time)
-    
-    write.table(t(result), filename4, sep = ",", row.names = FALSE, col.names = FALSE, append = TRUE)
+    return(list(
+      psi = psi,
+      V = V,
+      B_hat = B_hat
+    ))
   }
+  
+  ############################################################
+  ## 3. Bias correction by adding correction term
+  ############################################################
+  
+  bias_correct_add <- function(x_sub, y_sub, beta_hat) {
+    
+    q <- get_quantities(x_sub, y_sub, beta_hat)
+    
+    ## Paper form:
+    ## beta_bc = beta_hat - B_hat / k_N
+    beta_bc <- beta_hat - q$B_hat / k_N
+    
+    return(beta_bc)
+  }
+  
+  ############################################################
+  ## 4. Bias correction by solving adjusted equation
+  ############################################################
+  
+  bias_correct_equation <- function(x_sub, y_sub, beta_start, max_iter = 20) {
+    
+    beta <- beta_start
+    
+    for (iter in 1:max_iter) {
+      
+      q <- get_quantities(x_sub, y_sub, beta)
+      
+      mean_psi <- colMeans(q$psi)
+      
+      ## Adjusted equation:
+      ## sum psi + V B = 0
+      ##
+      ## Divide by k_N:
+      ## mean psi + V B / k_N = 0
+      adjusted_score <- mean_psi + as.numeric(q$V %*% q$B_hat) / k_N
+      
+      step <- solve(q$V, adjusted_score)
+      
+      beta_new <- beta - as.numeric(step)
+      
+      if (max(abs(beta_new - beta)) < 1e-8) {
+        beta <- beta_new
+        break
+      }
+      
+      beta <- beta_new
+    }
+    
+    return(beta)
+  }
+  
+  ############################################################
+  ## Main subbagging loop
+  ############################################################
+  
+  beta_simple_list <- list()
+  beta_bc_add_list <- list()
+  beta_bc_equation_list <- list()
+  
+  for (s in 1:m_N) {
+    
+    subsample_id <- sample(1:N, size = k_N, replace = FALSE)
+    
+    x_sub <- x[subsample_id, , drop = FALSE]
+    y_sub <- y[subsample_id]
+    
+    ## 1. Original subsample estimator
+    beta_hat <- fit_original(x_sub, y_sub)
+    
+    ## 2. Bias correction by adding correction term
+    beta_bc_add <- bias_correct_add(x_sub, y_sub, beta_hat)
+    
+    ## 3. Bias correction by solving adjusted equation
+    beta_bc_equation <- bias_correct_equation(x_sub, y_sub, beta_bc_add)
+    
+    beta_simple_list[[s]] <- beta_hat
+    beta_bc_add_list[[s]] <- beta_bc_add
+    beta_bc_equation_list[[s]] <- beta_bc_equation
+  }
+  
+  ############################################################
+  ## Aggregate over m_N subsamples
+  ############################################################
+  
+  beta_simple_average <- Reduce("+", beta_simple_list) / m_N
+  beta_bc_add_average <- Reduce("+", beta_bc_add_list) / m_N
+  beta_bc_equation_average <- Reduce("+", beta_bc_equation_list) / m_N
+  
+  return(list(
+    simple_average = beta_simple_average,
+    bias_correction_add = beta_bc_add_average,
+    bias_correction_equation = beta_bc_equation_average,
+    
+    subsample_simple = beta_simple_list,
+    subsample_bc_add = beta_bc_add_list,
+    subsample_bc_equation = beta_bc_equation_list
+  ))
 }
