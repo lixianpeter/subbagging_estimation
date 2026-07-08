@@ -1,60 +1,46 @@
 ############################################################
-## Safe Subbagging Simulation for Logistic Regression
-## Based on the paper setting
+## Clean Subbagging Simulation Script
 ##
-## Methods:
-##   1. full_sample
-##   2. simple_average
-##   3. bias_correction_add      = bc2 in paper style
-##   4. bias_correction_equation = bc3 in paper style
+## For each setting, save:
+##   1. raw_by_seed.csv  : one row per replication / seed
+##   2. summary.csv      : summary across replications
 ############################################################
 
 rm(list = ls())
 
 ############################################################
-## 0. Safe matrix solver
+## 0. Safe solver
 ############################################################
 
 safe_solve <- function(A, B, tol = 1e-10) {
   
   if (any(!is.finite(A)) || any(!is.finite(B))) {
-    stop("Non-finite value in matrix solve.")
+    stop("Non-finite value in solve.")
   }
   
   if (nrow(A) != ncol(A)) {
-    stop("Matrix A is not square.")
+    stop("A is not square.")
   }
   
   qrA <- qr(A, tol = tol)
   
   if (qrA$rank < ncol(A)) {
-    stop("Singular or rank-deficient matrix.")
+    stop("Singular matrix.")
   }
   
-  out <- tryCatch(
-    solve(A, B),
-    error = function(e) {
-      stop("Matrix solve failed.")
-    }
-  )
-  
-  return(out)
+  solve(A, B)
 }
 
 
 ############################################################
-## 1. Core subbagging function
+## 1. Subbagging core
 ############################################################
 
 SubbaggingCore <- function(data,
                            k_N,
                            m_N,
                            y_name = "y",
-                           model = c("Linear", "Logistic"),
-                           max_bad_draws = 10000,
-                           verbose = TRUE) {
-  
-  model <- match.arg(model)
+                           max_bad_draws = NULL) {
   
   y <- data[[y_name]]
   x <- as.matrix(data[, setdiff(names(data), y_name), drop = FALSE])
@@ -65,117 +51,81 @@ SubbaggingCore <- function(data,
   if (k_N > N) stop("k_N cannot be larger than N.")
   if (k_N <= p) stop("k_N must be larger than p.")
   
+  if (is.null(max_bad_draws)) {
+    max_bad_draws <- max(10000, 10 * m_N)
+  }
+  
   ############################################################
-  ## 1. Original estimator on one subsample
+  ## Logistic MLE on one subsample
   ############################################################
   
   fit_original <- function(x_sub, y_sub) {
     
     if (qr(x_sub)$rank < ncol(x_sub)) {
-      stop("x_sub is rank deficient.")
+      stop("Rank deficient x_sub.")
     }
     
-    if (model == "Linear") {
-      beta_hat <- safe_solve(crossprod(x_sub), crossprod(x_sub, y_sub))
-      beta_hat <- as.numeric(beta_hat)
-    }
-    
-    if (model == "Logistic") {
-      fit <- suppressWarnings(
-        glm.fit(
-          x = x_sub,
-          y = y_sub,
-          family = binomial(link = "logit"),
-          control = glm.control(maxit = 50)
-        )
+    fit <- suppressWarnings(
+      glm.fit(
+        x = x_sub,
+        y = y_sub,
+        family = binomial(link = "logit"),
+        control = glm.control(maxit = 50)
       )
-      
-      beta_hat <- as.numeric(coef(fit))
-      
-      if (any(!is.finite(beta_hat))) {
-        stop("Logistic glm produced non-finite coefficients.")
-      }
+    )
+    
+    beta_hat <- as.numeric(coef(fit))
+    
+    if (any(!is.finite(beta_hat))) {
+      stop("Non-finite logistic coefficient.")
     }
     
-    return(beta_hat)
+    beta_hat
   }
   
   ############################################################
-  ## 2. Compute psi, V, and B_hat
+  ## Compute psi, V, and B_hat
   ############################################################
   
   get_quantities <- function(x_sub, y_sub, beta) {
     
     k <- nrow(x_sub)
     
-    if (model == "Linear") {
-      
-      residual <- as.numeric(y_sub - x_sub %*% beta)
-      
-      ## psi_i(beta) = x_i (y_i - x_i^T beta)
-      psi <- x_sub * residual
-      
-      ## V = average derivative of psi
-      V <- -crossprod(x_sub) / k
-      
-      ## A_i = V^{-1} psi_i
-      A <- t(safe_solve(V, t(psi)))
-      
-      ## D_i A_i = -x_i x_i^T A_i
-      xa <- rowSums(x_sub * A)
-      D_a <- -x_sub * xa
-      
-      first_part <- -colMeans(D_a - psi)
-      
-      ## Linear regression second derivative is zero
-      second_part <- rep(0, ncol(x_sub))
+    eta <- as.numeric(x_sub %*% beta)
+    prob <- plogis(eta)
+    w <- prob * (1 - prob)
+    
+    if (min(w) < 1e-14 && mean(w) < 1e-8) {
+      stop("Possible logistic separation.")
     }
     
-    if (model == "Logistic") {
-      
-      eta <- as.numeric(x_sub %*% beta)
-      prob <- plogis(eta)
-      w <- prob * (1 - prob)
-      
-      ## If all weights are basically zero, V will be singular
-      if (min(w) < 1e-14 && mean(w) < 1e-8) {
-        stop("Logistic weights are too small. Possible separation.")
-      }
-      
-      ## psi_i(beta) = x_i (y_i - p_i)
-      psi <- x_sub * as.numeric(y_sub - prob)
-      
-      ## V = average derivative of psi
-      V <- -crossprod(x_sub, x_sub * w) / k
-      
-      ## A_i = V^{-1} psi_i
-      A <- t(safe_solve(V, t(psi)))
-      
-      ## D_i A_i = -w_i x_i x_i^T A_i
-      xa <- rowSums(x_sub * A)
-      D_a <- -x_sub * as.numeric(w * xa)
-      
-      first_part <- -colMeans(D_a - psi)
-      
-      ## second derivative part
-      second_part <- -0.5 * colMeans(
-        x_sub * as.numeric(w * (1 - 2 * prob) * xa^2)
-      )
-    }
+    psi <- x_sub * as.numeric(y_sub - prob)
     
-    ## B_hat
+    V <- -crossprod(x_sub, x_sub * w) / k
+    
+    A <- t(safe_solve(V, t(psi)))
+    
+    xa <- rowSums(x_sub * A)
+    D_a <- -x_sub * as.numeric(w * xa)
+    
+    first_part <- -colMeans(D_a - psi)
+    
+    second_part <- -0.5 * colMeans(
+      x_sub * as.numeric(w * (1 - 2 * prob) * xa^2)
+    )
+    
     B_hat <- -safe_solve(V, first_part + second_part)
     B_hat <- as.numeric(B_hat)
     
-    return(list(
+    list(
       psi = psi,
       V = V,
       B_hat = B_hat
-    ))
+    )
   }
   
   ############################################################
-  ## 3. Bias correction by subtracting estimated bias
+  ## bc2: theta_hat - B_hat / k_N
   ############################################################
   
   bias_correct_add <- function(x_sub, y_sub, beta_hat) {
@@ -186,14 +136,14 @@ SubbaggingCore <- function(data,
     beta_bc <- beta_hat - q$B_hat / k
     
     if (any(!is.finite(beta_bc))) {
-      stop("Non-finite beta_bc.")
+      stop("Non-finite bc2.")
     }
     
-    return(beta_bc)
+    beta_bc
   }
   
   ############################################################
-  ## 4. Bias correction by solving adjusted equation
+  ## bc3: solve adjusted estimating equation
   ############################################################
   
   bias_correct_equation <- function(x_sub,
@@ -211,10 +161,6 @@ SubbaggingCore <- function(data,
       
       mean_psi <- colMeans(q$psi)
       
-      ## Adjusted equation:
-      ## sum psi + V B = 0
-      ## divide by k:
-      ## mean psi + V B / k = 0
       adjusted_score <- mean_psi + as.numeric(q$V %*% q$B_hat) / k
       
       step <- safe_solve(q$V, adjusted_score)
@@ -223,7 +169,7 @@ SubbaggingCore <- function(data,
       beta_new <- beta - step
       
       if (any(!is.finite(beta_new))) {
-        stop("Non-finite beta in adjusted equation.")
+        stop("Non-finite bc3.")
       }
       
       if (max(abs(beta_new - beta)) < tol) {
@@ -234,17 +180,20 @@ SubbaggingCore <- function(data,
       beta <- beta_new
     }
     
-    return(beta)
+    beta
   }
   
   ############################################################
-  ## 5. Main subbagging loop
-  ## Bad subsamples are redrawn
+  ## Main loop
   ############################################################
   
   sum_simple <- rep(0, p)
-  sum_bc_add <- rep(0, p)
-  sum_bc_equation <- rep(0, p)
+  sum_bc2 <- rep(0, p)
+  sum_bc3 <- rep(0, p)
+  
+  sumsq_simple <- rep(0, p)
+  sumsq_bc2 <- rep(0, p)
+  sumsq_bc3 <- rep(0, p)
   
   accepted <- 0
   bad_draws <- 0
@@ -256,25 +205,19 @@ SubbaggingCore <- function(data,
     
     one_draw <- tryCatch({
       
-      subsample_id <- sample.int(N, size = k_N, replace = FALSE)
+      id <- sample.int(N, size = k_N, replace = FALSE)
       
-      x_sub <- x[subsample_id, , drop = FALSE]
-      y_sub <- y[subsample_id]
+      x_sub <- x[id, , drop = FALSE]
+      y_sub <- y[id]
       
       beta_hat <- fit_original(x_sub, y_sub)
-      
-      beta_bc_add <- bias_correct_add(x_sub, y_sub, beta_hat)
-      
-      beta_bc_equation <- bias_correct_equation(
-        x_sub = x_sub,
-        y_sub = y_sub,
-        beta_start = beta_bc_add
-      )
+      beta_bc2 <- bias_correct_add(x_sub, y_sub, beta_hat)
+      beta_bc3 <- bias_correct_equation(x_sub, y_sub, beta_bc2)
       
       list(
-        beta_hat = beta_hat,
-        beta_bc_add = beta_bc_add,
-        beta_bc_equation = beta_bc_equation
+        simple = beta_hat,
+        bc2 = beta_bc2,
+        bc3 = beta_bc3
       )
       
     }, error = function(e) {
@@ -282,16 +225,11 @@ SubbaggingCore <- function(data,
     })
     
     if (is.null(one_draw)) {
+      
       bad_draws <- bad_draws + 1
       
       if (bad_draws > max_bad_draws) {
-        stop(
-          paste0(
-            "Too many bad subsamples. ",
-            "Check k_N, p, collinearity, or logistic separation. ",
-            "bad_draws = ", bad_draws
-          )
-        )
+        stop("Too many bad subsamples.")
       }
       
       next
@@ -299,62 +237,73 @@ SubbaggingCore <- function(data,
     
     accepted <- accepted + 1
     
-    sum_simple <- sum_simple + one_draw$beta_hat
-    sum_bc_add <- sum_bc_add + one_draw$beta_bc_add
-    sum_bc_equation <- sum_bc_equation + one_draw$beta_bc_equation
+    sum_simple <- sum_simple + one_draw$simple
+    sum_bc2 <- sum_bc2 + one_draw$bc2
+    sum_bc3 <- sum_bc3 + one_draw$bc3
     
-    if (verbose && accepted %% max(1, floor(m_N / 5)) == 0) {
-      message("Accepted subsamples: ", accepted, " / ", m_N)
-    }
+    sumsq_simple <- sumsq_simple + one_draw$simple^2
+    sumsq_bc2 <- sumsq_bc2 + one_draw$bc2^2
+    sumsq_bc3 <- sumsq_bc3 + one_draw$bc3^2
   }
   
-  return(list(
-    simple_average = sum_simple / m_N,
-    bias_correction_add = sum_bc_add / m_N,
-    bias_correction_equation = sum_bc_equation / m_N,
-    accepted_subsamples = accepted,
+  beta_simple <- sum_simple / m_N
+  beta_bc2 <- sum_bc2 / m_N
+  beta_bc3 <- sum_bc3 / m_N
+  
+  sd_simple <- sqrt(pmax(sumsq_simple / m_N - beta_simple^2, 0))
+  sd_bc2 <- sqrt(pmax(sumsq_bc2 / m_N - beta_bc2^2, 0))
+  sd_bc3 <- sqrt(pmax(sumsq_bc3 / m_N - beta_bc3^2, 0))
+  
+  list(
+    simple = beta_simple,
+    bc2 = beta_bc2,
+    bc3 = beta_bc3,
+    
+    simple_sd = sd_simple,
+    bc2_sd = sd_bc2,
+    bc3_sd = sd_bc3,
+    
     bad_draws = bad_draws,
     total_draws = total_draws
-  ))
+  )
 }
 
 
 ############################################################
-## 2. Full sample estimator
+## 2. Full-sample logistic estimator
 ############################################################
 
-FitFullEstimator <- function(data,
-                             y_name = "y",
-                             model = c("Linear", "Logistic")) {
-  
-  model <- match.arg(model)
+FitFullLogistic <- function(data, y_name = "y") {
   
   y <- data[[y_name]]
   x <- as.matrix(data[, setdiff(names(data), y_name), drop = FALSE])
   
-  if (model == "Linear") {
-    beta_hat <- safe_solve(crossprod(x), crossprod(x, y))
-    beta_hat <- as.numeric(beta_hat)
-  }
-  
-  if (model == "Logistic") {
-    fit <- suppressWarnings(
-      glm.fit(
-        x = x,
-        y = y,
-        family = binomial(link = "logit"),
-        control = glm.control(maxit = 50)
-      )
+  fit <- suppressWarnings(
+    glm.fit(
+      x = x,
+      y = y,
+      family = binomial(link = "logit"),
+      control = glm.control(maxit = 50)
     )
-    
-    beta_hat <- as.numeric(coef(fit))
+  )
+  
+  beta <- as.numeric(coef(fit))
+  
+  if (any(!is.finite(beta))) {
+    stop("Full sample logistic failed.")
   }
   
-  if (any(!is.finite(beta_hat))) {
-    stop("Full sample estimator failed.")
-  }
+  prob <- fitted(fit)
+  w <- prob * (1 - prob)
   
-  return(beta_hat)
+  fisher <- crossprod(x, x * w)
+  cov_hat <- safe_solve(fisher, diag(ncol(x)))
+  se <- sqrt(diag(cov_hat))
+  
+  list(
+    beta = beta,
+    se = se
+  )
 }
 
 
@@ -362,7 +311,7 @@ FitFullEstimator <- function(data,
 ## 3. Paper logistic DGP
 ############################################################
 
-GeneratePaperLogisticData <- function(N, theta0 = c(0, 1)) {
+GenerateData <- function(N, theta0 = c(0, 1)) {
   
   x1 <- rnorm(N)
   
@@ -376,353 +325,247 @@ GeneratePaperLogisticData <- function(N, theta0 = c(0, 1)) {
   
   y <- rbinom(N, size = 1, prob = prob)
   
-  data <- data.frame(
+  data.frame(
     y = y,
     intercept = X[, 1],
     x1 = X[, 2]
   )
-  
-  return(data)
 }
 
 
 ############################################################
-## 4. One replication
+## 4. One replication, one row output
 ############################################################
 
 OneReplication <- function(rep_id,
+                           seed_base,
                            N,
                            alpha,
-                           k_exponent,
-                           m_rule = c("alphaN", "alphaN43"),
-                           theta0 = c(0, 1),
-                           seed = 12345,
-                           max_m_N = Inf,
-                           verbose = FALSE) {
+                           k_N,
+                           m_N,
+                           theta0 = c(0, 1)) {
   
-  m_rule <- match.arg(m_rule)
+  seed_index <- seed_base + rep_id
+  set.seed(seed_index)
   
-  set.seed(seed + rep_id)
+  data <- GenerateData(N = N, theta0 = theta0)
   
-  data <- GeneratePaperLogisticData(
-    N = N,
-    theta0 = theta0
-  )
+  k_N <- as.integer(k_N)
+  if (k_N <= 0) stop("k_N must be positive.")
   
-  k_N <- floor(N^k_exponent)
+  m_N <- as.integer(m_N)
+  if (m_N <= 0) stop("m_N must be positive.")
   
-  if (m_rule == "alphaN") {
-    m_N_exact <- floor(alpha * N / k_N)
-  }
+  full <- FitFullLogistic(data)
   
-  if (m_rule == "alphaN43") {
-    m_N_exact <- floor(alpha * N^(4 / 3) / k_N)
-  }
-  
-  m_N <- m_N_exact
-  
-  if (is.finite(max_m_N)) {
-    m_N <- min(m_N, max_m_N)
-  }
-  
-  m_N <- as.integer(max(1, m_N))
-  
-  if (verbose) {
-    message("N = ", N)
-    message("k_N = ", k_N)
-    message("m_N_exact = ", m_N_exact)
-    message("m_N_used = ", m_N)
-  }
-  
-  time_start <- Sys.time()
-  
-  beta_full <- FitFullEstimator(
-    data = data,
-    model = "Logistic"
-  )
-  
-  subbagging_result <- SubbaggingCore(
+  sub <- SubbaggingCore(
     data = data,
     k_N = k_N,
+    m_N = m_N
+  )
+  
+  data.frame(
+    seed_index = seed_index,
+    rep = rep_id,
+    
+    N = N,
+    alpha = alpha,
+    k_N = k_N,
     m_N = m_N,
-    y_name = "y",
-    model = "Logistic",
-    verbose = FALSE
+    
+    full_theta1 = full$beta[1],
+    full_theta2 = full$beta[2],
+    full_sd_theta1 = full$se[1],
+    full_sd_theta2 = full$se[2],
+    
+    simple_theta1 = sub$simple[1],
+    simple_theta2 = sub$simple[2],
+    simple_sd_theta1 = sub$simple_sd[1],
+    simple_sd_theta2 = sub$simple_sd[2],
+    
+    bc2_theta1 = sub$bc2[1],
+    bc2_theta2 = sub$bc2[2],
+    bc2_sd_theta1 = sub$bc2_sd[1],
+    bc2_sd_theta2 = sub$bc2_sd[2],
+    
+    bc3_theta1 = sub$bc3[1],
+    bc3_theta2 = sub$bc3[2],
+    bc3_sd_theta1 = sub$bc3_sd[1],
+    bc3_sd_theta2 = sub$bc3_sd[2],
+    
+    bad_draws = sub$bad_draws,
+    total_draws = sub$total_draws,
+    
+    stringsAsFactors = FALSE
   )
-  
-  time_used <- as.numeric(Sys.time() - time_start, units = "secs")
-  
-  est_list <- list(
-    full_sample = beta_full,
-    simple_average = subbagging_result$simple_average,
-    bias_correction_add = subbagging_result$bias_correction_add,
-    bias_correction_equation = subbagging_result$bias_correction_equation
-  )
-  
-  out <- do.call(
-    rbind,
-    lapply(names(est_list), function(method_name) {
-      
-      est <- as.numeric(est_list[[method_name]])
-      
-      data.frame(
-        rep = rep_id,
-        N = N,
-        alpha = alpha,
-        k_exponent = k_exponent,
-        k_N = k_N,
-        m_rule = m_rule,
-        m_N_exact = m_N_exact,
-        m_N_used = m_N,
-        method = method_name,
-        parameter = paste0("theta", seq_along(theta0)),
-        estimate = est,
-        truth = theta0,
-        bad_draws = subbagging_result$bad_draws,
-        total_draws = subbagging_result$total_draws,
-        time_seconds = time_used,
-        stringsAsFactors = FALSE
-      )
-    })
-  )
-  
-  rownames(out) <- NULL
-  return(out)
 }
 
 
 ############################################################
-## 5. Run simulation for one setting
+## 5. Summary from raw_by_seed.csv
 ############################################################
 
-RunOneSetting <- function(R = 100,
-                          N = 20000,
-                          alpha = 1,
-                          k_exponent = 5 / 12,
-                          m_rule = c("alphaN", "alphaN43"),
-                          theta0 = c(0, 1),
-                          seed = 12345,
-                          max_m_N = Inf,
-                          verbose = TRUE) {
+SummariseRaw <- function(raw, theta0 = c(0, 1)) {
   
-  m_rule <- match.arg(m_rule)
+  methods <- c("full", "simple", "bc2", "bc3")
+  params <- c("theta1", "theta2")
+  
+  out_list <- list()
+  count <- 1
+  
+  for (method in methods) {
+    for (j in seq_along(params)) {
+      
+      param <- params[j]
+      truth <- theta0[j]
+      
+      est_col <- paste0(method, "_", param)
+      sd_col <- paste0(method, "_sd_", param)
+      
+      est <- raw[[est_col]]
+      within_sd <- raw[[sd_col]]
+      
+      bias <- mean(est - truth)
+      mc_sd <- sqrt(mean((est - mean(est))^2))
+      rmse <- sqrt(mean((est - truth)^2))
+      
+      out_list[[count]] <- data.frame(
+        method = method,
+        parameter = param,
+        truth = truth,
+        R = nrow(raw),
+        mean_estimate = mean(est),
+        BIAS = bias,
+        SD = mc_sd,
+        RMSE = rmse,
+        BIAS_x100 = 100 * bias,
+        SD_x100 = 100 * mc_sd,
+        RMSE_x100 = 100 * rmse,
+        mean_within_rep_sd = mean(within_sd),
+        stringsAsFactors = FALSE
+      )
+      
+      count <- count + 1
+    }
+  }
+  
+  do.call(rbind, out_list)
+}
+
+
+############################################################
+## 6. Folder name
+############################################################
+
+SettingName <- function(N, alpha, k_N, m_N) {
+  
+  alpha_name <- ifelse(abs(alpha - 1) < 1e-12, "alpha_1",
+                       ifelse(abs(alpha - 1/3) < 1e-12, "alpha_1over3",
+                              paste0("alpha_", alpha)))
+  
+  k_name <- paste0("k_N_", k_N)
+  m_name <- paste0("m_N_", m_N)
+  
+  paste0("N_", N, "__", alpha_name, "__", k_name, "__", m_name)
+}
+
+
+############################################################
+## 7. Run one setting and write raw file only
+############################################################
+
+RunOneSetting <- function(R,
+                          N,
+                          alpha,
+                          k_N,
+                          m_N,
+                          theta0 = c(0, 1),
+                          seed_base = seed,
+                          output_root = "subbagging_results") {
+  
+  setting_name <- SettingName(N, alpha, k_N, m_N)
+  setting_dir <- file.path(output_root, setting_name)
+  
+  dir.create(setting_dir, recursive = TRUE, showWarnings = FALSE)
   
   raw_list <- vector("list", R)
   
   for (r in 1:R) {
     
-    if (verbose) {
-      message("Replication ", r, " / ", R)
-    }
+    message("[", setting_name, "] replication ", r, " / ", R)
     
     raw_list[[r]] <- OneReplication(
       rep_id = r,
+      seed_base = seed_base,
       N = N,
       alpha = alpha,
-      k_exponent = k_exponent,
-      m_rule = m_rule,
-      theta0 = theta0,
-      seed = seed,
-      max_m_N = max_m_N,
-      verbose = FALSE
+      k_N = k_N,
+      m_N = m_N,
+      theta0 = theta0
     )
   }
   
-  raw_result <- do.call(rbind, raw_list)
+  raw <- do.call(rbind, raw_list)
   
-  summary_result <- SummariseSimulation(raw_result)
-  
-  return(list(
-    raw = raw_result,
-    summary = summary_result
-  ))
-}
-
-
-############################################################
-## 6. Summarise results
-############################################################
-
-SummariseSimulation <- function(raw_result) {
-  
-  group_id <- interaction(
-    raw_result$N,
-    raw_result$alpha,
-    raw_result$k_exponent,
-    raw_result$k_N,
-    raw_result$m_rule,
-    raw_result$m_N_used,
-    raw_result$method,
-    raw_result$parameter,
-    drop = TRUE
+  raw_file_name <- paste0(
+    "N=", N,
+    "_alpha=", alpha,
+    "_k_N=", k_N,
+    "_m_N=", m_N,
+    ".csv"
   )
   
-  out <- do.call(
-    rbind,
-    lapply(split(raw_result, group_id), function(d) {
-      
-      bias <- mean(d$estimate - d$truth)
-      
-      ## Paper-style SD uses denominator R, not R - 1
-      sd_paper <- sqrt(mean((d$estimate - mean(d$estimate))^2))
-      
-      rmse <- sqrt(bias^2 + sd_paper^2)
-      
-      data.frame(
-        N = d$N[1],
-        alpha = d$alpha[1],
-        k_exponent = d$k_exponent[1],
-        k_N = d$k_N[1],
-        m_rule = d$m_rule[1],
-        m_N_used = d$m_N_used[1],
-        method = d$method[1],
-        parameter = d$parameter[1],
-        truth = d$truth[1],
-        mean_estimate = mean(d$estimate),
-        BIAS = bias,
-        SD = sd_paper,
-        RMSE = rmse,
-        BIAS_x100 = 100 * bias,
-        SD_x100 = 100 * sd_paper,
-        RMSE_x100 = 100 * rmse,
-        avg_bad_draws = mean(d$bad_draws),
-        avg_total_draws = mean(d$total_draws),
-        avg_time_seconds = mean(d$time_seconds),
-        stringsAsFactors = FALSE
-      )
-    })
-  )
-  
-  rownames(out) <- NULL
-  return(out)
-}
-
-
-############################################################
-## 7. Paper grid
-############################################################
-
-MakePaperGrid <- function() {
-  
-  grid <- expand.grid(
-    N = c(20000, 100000, 500000),
-    alpha = c(1, 1 / 3),
-    k_exponent = c(5 / 12, 6 / 12, 7 / 12, 8 / 12),
-    m_rule = c("alphaN", "alphaN43"),
-    stringsAsFactors = FALSE
-  )
-  
-  return(grid)
-}
-
-
-RunPaperGrid <- function(R = 1000,
-                         grid = MakePaperGrid(),
-                         theta0 = c(0, 1),
-                         seed = 12345,
-                         max_m_N = Inf,
-                         output_dir = "subbagging_results") {
-  
-  dir.create(output_dir, showWarnings = FALSE, recursive = TRUE)
-  
-  all_summary <- list()
-  
-  for (g in 1:nrow(grid)) {
-    
-    N_g <- grid$N[g]
-    alpha_g <- grid$alpha[g]
-    k_exp_g <- grid$k_exponent[g]
-    m_rule_g <- grid$m_rule[g]
-    
-    message("============================================")
-    message("Grid ", g, " / ", nrow(grid))
-    message("N = ", N_g)
-    message("alpha = ", alpha_g)
-    message("k_exponent = ", k_exp_g)
-    message("m_rule = ", m_rule_g)
-    message("============================================")
-    
-    res <- RunOneSetting(
-      R = R,
-      N = N_g,
-      alpha = alpha_g,
-      k_exponent = k_exp_g,
-      m_rule = m_rule_g,
-      theta0 = theta0,
-      seed = seed + 100000 * g,
-      max_m_N = max_m_N,
-      verbose = TRUE
-    )
-    
-    tag <- paste0(
-      "N", N_g,
-      "_alpha", gsub("\\.", "_", as.character(alpha_g)),
-      "_kexp", gsub("\\.", "_", as.character(round(k_exp_g, 6))),
-      "_", m_rule_g
-    )
-    
-    write.csv(
-      res$raw,
-      file = file.path(output_dir, paste0("raw_", tag, ".csv")),
-      row.names = FALSE
-    )
-    
-    write.csv(
-      res$summary,
-      file = file.path(output_dir, paste0("summary_", tag, ".csv")),
-      row.names = FALSE
-    )
-    
-    all_summary[[g]] <- res$summary
-  }
-  
-  all_summary <- do.call(rbind, all_summary)
+  raw_file_path <- file.path(setting_dir, raw_file_name)
   
   write.csv(
-    all_summary,
-    file = file.path(output_dir, "all_summary.csv"),
+    raw,
+    file = raw_file_path,
     row.names = FALSE
   )
   
-  return(all_summary)
+  message("Saved raw file to: ", raw_file_path)
+  
+  invisible(list(
+    raw = raw,
+    raw_file_path = raw_file_path,
+    setting_dir = setting_dir
+  ))
 }
 
+############################################################
+## Global run values: one manually defined setting only
+############################################################
+
+seed <- 12345
+R <- 20
+N <- 20000
+alpha <- 1
+theta0 <- c(0, 1)
+
+## Choose the subsample size k_N directly through the formula you want.
+k_N <- floor(N^(5 / 12))
+
+## Choose the number of subsamples m_N directly through the formula you want.
+## Paper option 1:
+m_N <- floor(alpha * N / k_N)
+
+## Paper option 2, if needed later:
+## m_N <- floor(alpha * N^(4 / 3) / k_N)
+
+output_root <- "subbagging_one_setting_results"
+
 
 ############################################################
-## 8. Copy-paste runnable test
+## Run one setting
 ############################################################
 
-## This quick test should run first.
-## It uses the paper DGP but only R = 20 replications.
-
-test_res <- RunOneSetting(
-  R = 20,
-  N = 20000,
-  alpha = 1,
-  k_exponent = 5 / 12,
-  m_rule = "alphaN",
-  theta0 = c(0, 1),
-  seed = 12345,
-  max_m_N = Inf,
-  verbose = TRUE
+RunOneSetting(
+  R = R,
+  N = N,
+  alpha = alpha,
+  k_N = k_N,
+  m_N = m_N,
+  theta0 = theta0,
+  seed_base = seed,
+  output_root = output_root
 )
-
-print(test_res$summary)
-
-
-############################################################
-## 9. Full paper-style run
-############################################################
-
-## This is expensive.
-## Uncomment only after the quick test works.
-
-# paper_summary <- RunPaperGrid(
-#   R = 1000,
-#   theta0 = c(0, 1),
-#   seed = 12345,
-#   max_m_N = Inf,
-#   output_dir = "subbagging_results"
-# )
-#
-# print(paper_summary)
