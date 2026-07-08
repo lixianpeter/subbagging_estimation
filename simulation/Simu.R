@@ -1,6 +1,11 @@
 ############################################################
 ## Clean Subbagging Simulation Script
 ##
+## One manually defined setting only.
+## Supports:
+##   1. model_type = "logistic"
+##   2. model_type = "linear"
+##
 ## For each setting, save one raw CSV file.
 ## The CSV file name includes model_type, N, alpha, k_N, and m_N.
 ############################################################
@@ -39,7 +44,7 @@ CheckModelType <- function(model_type) {
   
   model_type <- match.arg(
     arg = model_type,
-    choices = c("logistic")
+    choices = c("logistic", "linear")
   )
   
   model_type
@@ -53,8 +58,11 @@ CheckModelType <- function(model_type) {
 SubbaggingCore <- function(data,
                            k_N,
                            m_N,
+                           model_type = "logistic",
                            y_name = "y",
                            max_bad_draws = NULL) {
+  
+  model_type <- CheckModelType(model_type)
   
   y <- data[[y_name]]
   x <- as.matrix(data[, setdiff(names(data), y_name), drop = FALSE])
@@ -70,7 +78,7 @@ SubbaggingCore <- function(data,
   }
   
   ############################################################
-  ## Logistic MLE on one subsample
+  ## M-estimator on one subsample
   ############################################################
   
   fit_original <- function(x_sub, y_sub) {
@@ -79,22 +87,39 @@ SubbaggingCore <- function(data,
       stop("Rank deficient x_sub.")
     }
     
-    fit <- suppressWarnings(
-      glm.fit(
-        x = x_sub,
-        y = y_sub,
-        family = binomial(link = "logit"),
-        control = glm.control(maxit = 50)
+    if (model_type == "logistic") {
+      
+      fit <- suppressWarnings(
+        glm.fit(
+          x = x_sub,
+          y = y_sub,
+          family = binomial(link = "logit"),
+          control = glm.control(maxit = 50)
+        )
       )
-    )
-    
-    beta_hat <- as.numeric(coef(fit))
-    
-    if (any(!is.finite(beta_hat))) {
-      stop("Non-finite logistic coefficient.")
+      
+      beta_hat <- as.numeric(coef(fit))
+      
+      if (any(!is.finite(beta_hat))) {
+        stop("Non-finite logistic coefficient.")
+      }
+      
+      return(beta_hat)
     }
     
-    beta_hat
+    if (model_type == "linear") {
+      
+      fit <- lm.fit(x = x_sub, y = y_sub)
+      beta_hat <- as.numeric(coef(fit))
+      
+      if (any(!is.finite(beta_hat))) {
+        stop("Non-finite linear coefficient.")
+      }
+      
+      return(beta_hat)
+    }
+    
+    stop("Unknown model_type.")
   }
   
   ############################################################
@@ -104,38 +129,73 @@ SubbaggingCore <- function(data,
   get_quantities <- function(x_sub, y_sub, beta) {
     
     k <- nrow(x_sub)
+    p <- ncol(x_sub)
     
     eta <- as.numeric(x_sub %*% beta)
-    prob <- plogis(eta)
-    w <- prob * (1 - prob)
     
-    if (min(w) < 1e-14 && mean(w) < 1e-8) {
-      stop("Possible logistic separation.")
+    if (model_type == "logistic") {
+      
+      prob <- plogis(eta)
+      w <- prob * (1 - prob)
+      
+      if (min(w) < 1e-14 && mean(w) < 1e-8) {
+        stop("Possible logistic separation.")
+      }
+      
+      psi <- x_sub * as.numeric(y_sub - prob)
+      
+      V <- -crossprod(x_sub, x_sub * w) / k
+      
+      A <- t(safe_solve(V, t(psi)))
+      
+      xa <- rowSums(x_sub * A)
+      D_a <- -x_sub * as.numeric(w * xa)
+      
+      first_part <- -colMeans(D_a - psi)
+      
+      second_part <- -0.5 * colMeans(
+        x_sub * as.numeric(w * (1 - 2 * prob) * xa^2)
+      )
+      
+      B_hat <- -safe_solve(V, first_part + second_part)
+      B_hat <- as.numeric(B_hat)
+      
+      return(list(
+        psi = psi,
+        V = V,
+        B_hat = B_hat
+      ))
     }
     
-    psi <- x_sub * as.numeric(y_sub - prob)
+    if (model_type == "linear") {
+      
+      resid <- as.numeric(y_sub - eta)
+      
+      psi <- x_sub * resid
+      
+      V <- -crossprod(x_sub) / k
+      
+      A <- t(safe_solve(V, t(psi)))
+      
+      xa <- rowSums(x_sub * A)
+      D_a <- -x_sub * as.numeric(xa)
+      
+      first_part <- -colMeans(D_a - psi)
+      
+      ## Linear regression has zero second derivative in beta.
+      second_part <- rep(0, p)
+      
+      B_hat <- -safe_solve(V, first_part + second_part)
+      B_hat <- as.numeric(B_hat)
+      
+      return(list(
+        psi = psi,
+        V = V,
+        B_hat = B_hat
+      ))
+    }
     
-    V <- -crossprod(x_sub, x_sub * w) / k
-    
-    A <- t(safe_solve(V, t(psi)))
-    
-    xa <- rowSums(x_sub * A)
-    D_a <- -x_sub * as.numeric(w * xa)
-    
-    first_part <- -colMeans(D_a - psi)
-    
-    second_part <- -0.5 * colMeans(
-      x_sub * as.numeric(w * (1 - 2 * prob) * xa^2)
-    )
-    
-    B_hat <- -safe_solve(V, first_part + second_part)
-    B_hat <- as.numeric(B_hat)
-    
-    list(
-      psi = psi,
-      V = V,
-      B_hat = B_hat
-    )
+    stop("Unknown model_type.")
   }
   
   ############################################################
@@ -284,7 +344,7 @@ SubbaggingCore <- function(data,
 
 
 ############################################################
-## 2. Full-sample logistic estimator
+## 2. Full-sample estimators
 ############################################################
 
 FitFullLogistic <- function(data, y_name = "y") {
@@ -321,15 +381,69 @@ FitFullLogistic <- function(data, y_name = "y") {
 }
 
 
+FitFullLinear <- function(data, y_name = "y") {
+  
+  y <- data[[y_name]]
+  x <- as.matrix(data[, setdiff(names(data), y_name), drop = FALSE])
+  
+  if (qr(x)$rank < ncol(x)) {
+    stop("Full sample linear design is rank deficient.")
+  }
+  
+  fit <- lm.fit(x = x, y = y)
+  beta <- as.numeric(coef(fit))
+  
+  if (any(!is.finite(beta))) {
+    stop("Full sample linear failed.")
+  }
+  
+  resid <- as.numeric(y - x %*% beta)
+  n <- nrow(x)
+  p <- ncol(x)
+  sigma2_hat <- sum(resid^2) / max(n - p, 1)
+  
+  xtx_inv <- safe_solve(crossprod(x), diag(p))
+  se <- sqrt(diag(sigma2_hat * xtx_inv))
+  
+  list(
+    beta = beta,
+    se = se
+  )
+}
+
+
+FitFullEstimator <- function(data,
+                             model_type = "logistic",
+                             y_name = "y") {
+  
+  model_type <- CheckModelType(model_type)
+  
+  if (model_type == "logistic") {
+    return(FitFullLogistic(data = data, y_name = y_name))
+  }
+  
+  if (model_type == "linear") {
+    return(FitFullLinear(data = data, y_name = y_name))
+  }
+  
+  stop("Unknown model_type.")
+}
+
+
 ############################################################
-## 3. Paper logistic DGP
+## 3. Data generation
 ############################################################
 
 GenerateData <- function(N,
                          theta0 = c(0, 1),
-                         model_type = "logistic") {
+                         model_type = "logistic",
+                         noise_sd = 1) {
   
   model_type <- CheckModelType(model_type)
+  
+  if (length(theta0) != 2) {
+    stop("This simple DGP expects theta0 to have length 2: intercept and x1 coefficient.")
+  }
   
   x1 <- rnorm(N)
   
@@ -339,15 +453,35 @@ GenerateData <- function(N,
   )
   
   eta <- as.numeric(X %*% theta0)
-  prob <- plogis(eta)
   
-  y <- rbinom(N, size = 1, prob = prob)
+  if (model_type == "logistic") {
+    
+    prob <- plogis(eta)
+    y <- rbinom(N, size = 1, prob = prob)
+    
+    return(data.frame(
+      y = y,
+      intercept = X[, 1],
+      x1 = X[, 2]
+    ))
+  }
   
-  data.frame(
-    y = y,
-    intercept = X[, 1],
-    x1 = X[, 2]
-  )
+  if (model_type == "linear") {
+    
+    if (!is.finite(noise_sd) || noise_sd <= 0) {
+      stop("noise_sd must be positive for linear regression.")
+    }
+    
+    y <- eta + rnorm(N, mean = 0, sd = noise_sd)
+    
+    return(data.frame(
+      y = y,
+      intercept = X[, 1],
+      x1 = X[, 2]
+    ))
+  }
+  
+  stop("Unknown model_type.")
 }
 
 
@@ -362,7 +496,8 @@ OneReplication <- function(rep_id,
                            k_N,
                            m_N,
                            theta0 = c(0, 1),
-                           model_type = "logistic") {
+                           model_type = "logistic",
+                           noise_sd = 1) {
   
   model_type <- CheckModelType(model_type)
   
@@ -372,7 +507,8 @@ OneReplication <- function(rep_id,
   data <- GenerateData(
     N = N,
     theta0 = theta0,
-    model_type = model_type
+    model_type = model_type,
+    noise_sd = noise_sd
   )
   
   k_N <- as.integer(k_N)
@@ -381,18 +517,23 @@ OneReplication <- function(rep_id,
   m_N <- as.integer(m_N)
   if (m_N <= 0) stop("m_N must be positive.")
   
-  full <- FitFullLogistic(data)
+  full <- FitFullEstimator(
+    data = data,
+    model_type = model_type
+  )
   
   sub <- SubbaggingCore(
     data = data,
     k_N = k_N,
-    m_N = m_N
+    m_N = m_N,
+    model_type = model_type
   )
   
   data.frame(
     seed_index = seed_index,
     rep = rep_id,
     model_type = model_type,
+    noise_sd = ifelse(model_type == "linear", noise_sd, NA_real_),
     
     N = N,
     alpha = alpha,
@@ -431,7 +572,7 @@ OneReplication <- function(rep_id,
 ## 6. Folder name
 ############################################################
 
-SettingName <- function(model_type, N, alpha, k_N, m_N) {
+SettingName <- function(model_type, N, alpha, k_N, m_N, noise_sd = 1) {
   
   model_type <- CheckModelType(model_type)
   
@@ -445,15 +586,21 @@ SettingName <- function(model_type, N, alpha, k_N, m_N) {
     )
   )
   
+  noise_name <- ifelse(
+    model_type == "linear",
+    paste0("__noise_sd_", noise_sd),
+    ""
+  )
+  
   paste0(
     "model_", model_type,
     "__N_", N,
     "__", alpha_name,
     "__k_N_", k_N,
-    "__m_N_", m_N
+    "__m_N_", m_N,
+    noise_name
   )
 }
-
 
 
 ############################################################
@@ -467,12 +614,20 @@ RunOneSetting <- function(R,
                           m_N,
                           model_type = "logistic",
                           theta0 = c(0, 1),
+                          noise_sd = 1,
                           seed_base = seed,
                           output_root = "subbagging_results") {
   
   model_type <- CheckModelType(model_type)
   
-  setting_name <- SettingName(model_type, N, alpha, k_N, m_N)
+  setting_name <- SettingName(
+    model_type = model_type,
+    N = N,
+    alpha = alpha,
+    k_N = k_N,
+    m_N = m_N,
+    noise_sd = noise_sd
+  )
   setting_dir <- file.path(output_root, setting_name)
   
   dir.create(setting_dir, recursive = TRUE, showWarnings = FALSE)
@@ -491,11 +646,18 @@ RunOneSetting <- function(R,
       k_N = k_N,
       m_N = m_N,
       theta0 = theta0,
-      model_type = model_type
+      model_type = model_type,
+      noise_sd = noise_sd
     )
   }
   
   raw <- do.call(rbind, raw_list)
+  
+  noise_file_part <- ifelse(
+    model_type == "linear",
+    paste0("_noise_sd=", noise_sd),
+    ""
+  )
   
   raw_file_name <- paste0(
     "model=", model_type,
@@ -503,6 +665,7 @@ RunOneSetting <- function(R,
     "_alpha=", alpha,
     "_k_N=", k_N,
     "_m_N=", m_N,
+    noise_file_part,
     ".csv"
   )
   
@@ -523,6 +686,7 @@ RunOneSetting <- function(R,
   ))
 }
 
+
 ############################################################
 ## Global run values: one manually defined setting only
 ############################################################
@@ -531,8 +695,16 @@ seed <- 12345
 R <- 20
 N <- 20000
 alpha <- 1
+
+## Choose one:
 model_type <- "logistic"
+## model_type <- "linear"
+
 theta0 <- c(0, 1)
+
+## Used only when model_type = "linear".
+## Ignored when model_type = "logistic".
+noise_sd <- 1
 
 ## Choose the subsample size k_N directly through the formula you want.
 k_N <- floor(N^(5 / 12))
@@ -559,6 +731,7 @@ RunOneSetting(
   m_N = m_N,
   model_type = model_type,
   theta0 = theta0,
+  noise_sd = noise_sd,
   seed_base = seed,
   output_root = output_root
 )
