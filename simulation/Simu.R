@@ -6,7 +6,7 @@
 ##   1. model_type = "logistic"
 ##   2. model_type = "linear"
 ##
-## For each setting, save one raw CSV file.
+## For each setting, save one raw CSV file directly inside output_root.
 ## The CSV file name includes model_type, N, alpha, k_N, and m_N.
 ############################################################
 
@@ -569,7 +569,7 @@ OneReplication <- function(rep_id,
 
 
 ############################################################
-## 6. Folder name
+## 6. Setting / file name label
 ############################################################
 
 SettingName <- function(model_type, N, alpha, k_N, m_N, noise_sd = 1) {
@@ -628,9 +628,8 @@ RunOneSetting <- function(R,
     m_N = m_N,
     noise_sd = noise_sd
   )
-  setting_dir <- file.path(output_root, setting_name)
   
-  dir.create(setting_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
   
   raw_list <- vector("list", R)
   
@@ -669,20 +668,20 @@ RunOneSetting <- function(R,
     ".csv"
   )
   
-  raw_file_path <- file.path(setting_dir, raw_file_name)
+  output_file <- file.path(output_root, raw_file_name)
   
   write.csv(
     raw,
-    file = raw_file_path,
+    file = output_file,
     row.names = FALSE
   )
   
-  message("Saved raw file to: ", raw_file_path)
+  message("Saved CSV file to: ", output_file)
   
   invisible(list(
     raw = raw,
-    raw_file_path = raw_file_path,
-    setting_dir = setting_dir
+    output_root = output_root,
+    raw_file_name = raw_file_name
   ))
 }
 
