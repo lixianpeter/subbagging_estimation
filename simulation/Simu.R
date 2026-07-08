@@ -1,9 +1,8 @@
 ############################################################
 ## Clean Subbagging Simulation Script
 ##
-## For each setting, save:
-##   1. raw_by_seed.csv  : one row per replication / seed
-##   2. summary.csv      : summary across replications
+## For each setting, save one raw CSV file.
+## The CSV file name includes model_type, N, alpha, k_N, and m_N.
 ############################################################
 
 rm(list = ls())
@@ -29,6 +28,21 @@ safe_solve <- function(A, B, tol = 1e-10) {
   }
   
   solve(A, B)
+}
+
+
+############################################################
+## 0b. Model type checker
+############################################################
+
+CheckModelType <- function(model_type) {
+  
+  model_type <- match.arg(
+    arg = model_type,
+    choices = c("logistic")
+  )
+  
+  model_type
 }
 
 
@@ -311,7 +325,11 @@ FitFullLogistic <- function(data, y_name = "y") {
 ## 3. Paper logistic DGP
 ############################################################
 
-GenerateData <- function(N, theta0 = c(0, 1)) {
+GenerateData <- function(N,
+                         theta0 = c(0, 1),
+                         model_type = "logistic") {
+  
+  model_type <- CheckModelType(model_type)
   
   x1 <- rnorm(N)
   
@@ -343,12 +361,19 @@ OneReplication <- function(rep_id,
                            alpha,
                            k_N,
                            m_N,
-                           theta0 = c(0, 1)) {
+                           theta0 = c(0, 1),
+                           model_type = "logistic") {
+  
+  model_type <- CheckModelType(model_type)
   
   seed_index <- seed_base + rep_id
   set.seed(seed_index)
   
-  data <- GenerateData(N = N, theta0 = theta0)
+  data <- GenerateData(
+    N = N,
+    theta0 = theta0,
+    model_type = model_type
+  )
   
   k_N <- as.integer(k_N)
   if (k_N <= 0) stop("k_N must be positive.")
@@ -367,6 +392,7 @@ OneReplication <- function(rep_id,
   data.frame(
     seed_index = seed_index,
     rep = rep_id,
+    model_type = model_type,
     
     N = N,
     alpha = alpha,
@@ -402,72 +428,32 @@ OneReplication <- function(rep_id,
 
 
 ############################################################
-## 5. Summary from raw_by_seed.csv
-############################################################
-
-SummariseRaw <- function(raw, theta0 = c(0, 1)) {
-  
-  methods <- c("full", "simple", "bc2", "bc3")
-  params <- c("theta1", "theta2")
-  
-  out_list <- list()
-  count <- 1
-  
-  for (method in methods) {
-    for (j in seq_along(params)) {
-      
-      param <- params[j]
-      truth <- theta0[j]
-      
-      est_col <- paste0(method, "_", param)
-      sd_col <- paste0(method, "_sd_", param)
-      
-      est <- raw[[est_col]]
-      within_sd <- raw[[sd_col]]
-      
-      bias <- mean(est - truth)
-      mc_sd <- sqrt(mean((est - mean(est))^2))
-      rmse <- sqrt(mean((est - truth)^2))
-      
-      out_list[[count]] <- data.frame(
-        method = method,
-        parameter = param,
-        truth = truth,
-        R = nrow(raw),
-        mean_estimate = mean(est),
-        BIAS = bias,
-        SD = mc_sd,
-        RMSE = rmse,
-        BIAS_x100 = 100 * bias,
-        SD_x100 = 100 * mc_sd,
-        RMSE_x100 = 100 * rmse,
-        mean_within_rep_sd = mean(within_sd),
-        stringsAsFactors = FALSE
-      )
-      
-      count <- count + 1
-    }
-  }
-  
-  do.call(rbind, out_list)
-}
-
-
-############################################################
 ## 6. Folder name
 ############################################################
 
-SettingName <- function(N, alpha, k_N, m_N) {
+SettingName <- function(model_type, N, alpha, k_N, m_N) {
   
-  alpha_name <- ifelse(abs(alpha - 1) < 1e-12, "alpha_1",
-                       ifelse(abs(alpha - 1/3) < 1e-12, "alpha_1over3",
-                              paste0("alpha_", alpha)))
+  model_type <- CheckModelType(model_type)
   
-  k_name <- paste0("k_N_", k_N)
-  m_name <- paste0("m_N_", m_N)
+  alpha_name <- ifelse(
+    abs(alpha - 1) < 1e-12,
+    "alpha_1",
+    ifelse(
+      abs(alpha - 1 / 3) < 1e-12,
+      "alpha_1over3",
+      paste0("alpha_", alpha)
+    )
+  )
   
-  paste0("N_", N, "__", alpha_name, "__", k_name, "__", m_name)
+  paste0(
+    "model_", model_type,
+    "__N_", N,
+    "__", alpha_name,
+    "__k_N_", k_N,
+    "__m_N_", m_N
+  )
 }
+
 
 
 ############################################################
@@ -479,11 +465,14 @@ RunOneSetting <- function(R,
                           alpha,
                           k_N,
                           m_N,
+                          model_type = "logistic",
                           theta0 = c(0, 1),
                           seed_base = seed,
                           output_root = "subbagging_results") {
   
-  setting_name <- SettingName(N, alpha, k_N, m_N)
+  model_type <- CheckModelType(model_type)
+  
+  setting_name <- SettingName(model_type, N, alpha, k_N, m_N)
   setting_dir <- file.path(output_root, setting_name)
   
   dir.create(setting_dir, recursive = TRUE, showWarnings = FALSE)
@@ -501,14 +490,16 @@ RunOneSetting <- function(R,
       alpha = alpha,
       k_N = k_N,
       m_N = m_N,
-      theta0 = theta0
+      theta0 = theta0,
+      model_type = model_type
     )
   }
   
   raw <- do.call(rbind, raw_list)
   
   raw_file_name <- paste0(
-    "N=", N,
+    "model=", model_type,
+    "_N=", N,
     "_alpha=", alpha,
     "_k_N=", k_N,
     "_m_N=", m_N,
@@ -540,6 +531,7 @@ seed <- 12345
 R <- 20
 N <- 20000
 alpha <- 1
+model_type <- "logistic"
 theta0 <- c(0, 1)
 
 ## Choose the subsample size k_N directly through the formula you want.
@@ -565,6 +557,7 @@ RunOneSetting(
   alpha = alpha,
   k_N = k_N,
   m_N = m_N,
+  model_type = model_type,
   theta0 = theta0,
   seed_base = seed,
   output_root = output_root
