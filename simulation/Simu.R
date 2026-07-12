@@ -1,736 +1,436 @@
 ############################################################
-## Clean Subbagging Simulation Script
-##
-## One manually defined setting only.
-## Supports:
-##   1. model_type = "logistic"
-##   2. model_type = "linear"
-##
-## For each setting, save one raw CSV file directly inside output_root.
-## The CSV file name includes model_type, N, alpha, k_N, and m_N.
-############################################################
-
-rm(list = ls())
-
-############################################################
-## 0. Safe solver
-############################################################
-
-safe_solve <- function(A, B, tol = 1e-10) {
-  
-  if (any(!is.finite(A)) || any(!is.finite(B))) {
-    stop("Non-finite value in solve.")
-  }
-  
-  if (nrow(A) != ncol(A)) {
-    stop("A is not square.")
-  }
-  
-  qrA <- qr(A, tol = tol)
-  
-  if (qrA$rank < ncol(A)) {
-    stop("Singular matrix.")
-  }
-  
-  solve(A, B)
-}
-
-
-############################################################
-## 0b. Model type checker
-############################################################
-
-CheckModelType <- function(model_type) {
-  
-  model_type <- match.arg(
-    arg = model_type,
-    choices = c("logistic", "linear")
-  )
-  
-  model_type
-}
-
-
-############################################################
 ## 1. Subbagging core
 ############################################################
-
-SubbaggingCore <- function(data,
-                           k_N,
-                           m_N,
-                           model_type = "logistic",
-                           y_name = "y",
-                           max_bad_draws = NULL) {
+SubbaggingCore <- function(data, k_N, alpha,
+                           model = c("linear", "logistic"),
+                           seed = 1) {
+  # model settings
+  model <- match.arg(model)
+  set.seed(seed)
   
-  model_type <- CheckModelType(model_type)
+  y <- as.numeric(data[, 1])
+  X <- as.matrix(data[, -1])
+  X <- cbind(Intercept = 1, X)
   
-  y <- data[[y_name]]
-  x <- as.matrix(data[, setdiff(names(data), y_name), drop = FALSE])
+  N <- nrow(X)
+  d <- ncol(X)
   
-  N <- nrow(x)
-  p <- ncol(x)
-  
-  if (k_N > N) stop("k_N cannot be larger than N.")
-  if (k_N <= p) stop("k_N must be larger than p.")
-  
-  if (is.null(max_bad_draws)) {
-    max_bad_draws <- max(10000, 10 * m_N)
-  }
+  m_N <- floor(alpha * N / k_N)
+  alpha_N <- k_N * m_N / N
   
   ############################################################
   ## M-estimator on one subsample
   ############################################################
-  
-  fit_original <- function(x_sub, y_sub) {
-    
-    if (qr(x_sub)$rank < ncol(x_sub)) {
-      stop("Rank deficient x_sub.")
+  fit_theta <- function(Xs, ys) {
+    if (model == "linear") {
+      beta <- lm.fit(Xs, ys)$coefficients
+    } else {
+      beta <- glm.fit(Xs, ys, family = binomial())$coefficients
     }
     
-    if (model_type == "logistic") {
-      
-      fit <- suppressWarnings(
-        glm.fit(
-          x = x_sub,
-          y = y_sub,
-          family = binomial(link = "logit"),
-          control = glm.control(maxit = 50)
-        )
-      )
-      
-      beta_hat <- as.numeric(coef(fit))
-      
-      if (any(!is.finite(beta_hat))) {
-        stop("Non-finite logistic coefficient.")
-      }
-      
-      return(beta_hat)
-    }
+    beta <- as.numeric(beta)
     
-    if (model_type == "linear") {
-      
-      fit <- lm.fit(x = x_sub, y = y_sub)
-      beta_hat <- as.numeric(coef(fit))
-      
-      if (any(!is.finite(beta_hat))) {
-        stop("Non-finite linear coefficient.")
-      }
-      
-      return(beta_hat)
-    }
-    
-    stop("Unknown model_type.")
-  }
-  
-  ############################################################
-  ## Compute psi, V, and B_hat
-  ############################################################
-  
-  get_quantities <- function(x_sub, y_sub, beta) {
-    
-    k <- nrow(x_sub)
-    p <- ncol(x_sub)
-    
-    eta <- as.numeric(x_sub %*% beta)
-    
-    if (model_type == "logistic") {
-      
-      prob <- plogis(eta)
-      w <- prob * (1 - prob)
-      
-      if (min(w) < 1e-14 && mean(w) < 1e-8) {
-        stop("Possible logistic separation.")
-      }
-      
-      psi <- x_sub * as.numeric(y_sub - prob)
-      
-      V <- -crossprod(x_sub, x_sub * w) / k
-      
-      A <- t(safe_solve(V, t(psi)))
-      
-      xa <- rowSums(x_sub * A)
-      D_a <- -x_sub * as.numeric(w * xa)
-      
-      first_part <- -colMeans(D_a - psi)
-      
-      second_part <- -0.5 * colMeans(
-        x_sub * as.numeric(w * (1 - 2 * prob) * xa^2)
-      )
-      
-      B_hat <- -safe_solve(V, first_part + second_part)
-      B_hat <- as.numeric(B_hat)
-      
-      return(list(
-        psi = psi,
-        V = V,
-        B_hat = B_hat
-      ))
-    }
-    
-    if (model_type == "linear") {
-      
-      resid <- as.numeric(y_sub - eta)
-      
-      psi <- x_sub * resid
-      
-      V <- -crossprod(x_sub) / k
-      
-      A <- t(safe_solve(V, t(psi)))
-      
-      xa <- rowSums(x_sub * A)
-      D_a <- -x_sub * as.numeric(xa)
-      
-      first_part <- -colMeans(D_a - psi)
-      
-      ## Linear regression has zero second derivative in beta.
-      second_part <- rep(0, p)
-      
-      B_hat <- -safe_solve(V, first_part + second_part)
-      B_hat <- as.numeric(B_hat)
-      
-      return(list(
-        psi = psi,
-        V = V,
-        B_hat = B_hat
-      ))
-    }
-    
-    stop("Unknown model_type.")
-  }
-  
-  ############################################################
-  ## bc2: theta_hat - B_hat / k_N
-  ############################################################
-  
-  bias_correct_add <- function(x_sub, y_sub, beta_hat) {
-    
-    k <- nrow(x_sub)
-    q <- get_quantities(x_sub, y_sub, beta_hat)
-    
-    beta_bc <- beta_hat - q$B_hat / k
-    
-    if (any(!is.finite(beta_bc))) {
-      stop("Non-finite bc2.")
-    }
-    
-    beta_bc
-  }
-  
-  ############################################################
-  ## bc3: solve adjusted estimating equation
-  ############################################################
-  
-  bias_correct_equation <- function(x_sub,
-                                    y_sub,
-                                    beta_start,
-                                    max_iter = 20,
-                                    tol = 1e-8) {
-    
-    beta <- beta_start
-    k <- nrow(x_sub)
-    
-    for (iter in 1:max_iter) {
-      
-      q <- get_quantities(x_sub, y_sub, beta)
-      
-      mean_psi <- colMeans(q$psi)
-      
-      adjusted_score <- mean_psi + as.numeric(q$V %*% q$B_hat) / k
-      
-      step <- safe_solve(q$V, adjusted_score)
-      step <- as.numeric(step)
-      
-      beta_new <- beta - step
-      
-      if (any(!is.finite(beta_new))) {
-        stop("Non-finite bc3.")
-      }
-      
-      if (max(abs(beta_new - beta)) < tol) {
-        beta <- beta_new
-        break
-      }
-      
-      beta <- beta_new
+    if (any(!is.finite(beta))) {
+      stop("bad fit")
     }
     
     beta
   }
   
   ############################################################
-  ## Main loop
+  ## Compute psi, V, and B_hat
   ############################################################
+  moments <- function(theta, Xs, ys) {
+    n <- nrow(Xs)
+    eta <- as.numeric(Xs %*% theta)
+    
+    if (model == "linear") {
+      mu <- eta
+      w  <- rep(1, n)
+      h  <- rep(0, n)
+    } else {
+      mu <- 1 / (1 + exp(-eta))
+      w  <- mu * (1 - mu)
+      h  <- w * (1 - 2 * mu)
+    }
+    
+    psi <- Xs * as.numeric(ys - mu)
+    V   <- -crossprod(Xs, Xs * w) / n
+    
+    list(psi = psi, V = V, w = w, h = h)
+  }
   
-  sum_simple <- rep(0, p)
-  sum_bc2 <- rep(0, p)
-  sum_bc3 <- rep(0, p)
+  Bhat <- function(theta, Xs, ys) {
+    n <- nrow(Xs)
+    d <- ncol(Xs)
+    
+    M <- moments(theta, Xs, ys)
+    V <- M$V
+    Vinv <- solve(V)
+    
+    psi <- M$psi
+    A <- psi %*% t(Vinv)
+    
+    XA <- rowSums(Xs * A)
+    
+    D_part <- colMeans(Xs * (-M$w * XA))
+    V_part <- as.numeric(V %*% colMeans(A))
+    
+    term1 <- -(D_part - V_part)
+    
+    Q <- crossprod(A) / n
+    term2 <- rep(0, d)
+    
+    if (model == "logistic") {
+      for (j in 1:d) {
+        Hj <- -crossprod(Xs, Xs * (M$h * Xs[, j])) / n
+        term2[j] <- 0.5 * sum(Hj * Q)
+      }
+    }
+    
+    B <- -as.numeric(Vinv %*% (term1 + term2))
+    
+    if (any(!is.finite(B))) {
+      stop("bad Bhat")
+    }
+    
+    B
+  }
   
-  sumsq_simple <- rep(0, p)
-  sumsq_bc2 <- rep(0, p)
-  sumsq_bc3 <- rep(0, p)
+  adjusted_score <- function(theta, Xs, ys) {
+    M <- moments(theta, Xs, ys)
+    score <- colSums(M$psi)
+    B <- Bhat(theta, Xs, ys)
+    
+    as.numeric(score + M$V %*% B)
+  }
   
-  accepted <- 0
+  solve_bc_equation <- function(theta_start, Xs, ys) {
+    obj <- function(theta) {
+      score <- adjusted_score(theta, Xs, ys)
+      sum(score^2)
+    }
+    
+    theta_bc <- optim(theta_start, obj, method = "BFGS")$par
+    
+    if (any(!is.finite(theta_bc))) {
+      stop("bad bc equation")
+    }
+    
+    theta_bc
+  }
+  
+  theta_simple      <- matrix(0, m_N, d)
+  theta_bc_bias     <- matrix(0, m_N, d)
+  theta_bc_equation <- matrix(0, m_N, d)
+  
   bad_draws <- 0
   total_draws <- 0
   
-  while (accepted < m_N) {
+  for (b in 1:m_N) {
     
-    total_draws <- total_draws + 1
+    valid_draw <- FALSE
     
-    one_draw <- tryCatch({
+    while (!valid_draw) {
       
-      id <- sample.int(N, size = k_N, replace = FALSE)
+      total_draws <- total_draws + 1
       
-      x_sub <- x[id, , drop = FALSE]
-      y_sub <- y[id]
+      id <- sample(1:N, k_N, replace = FALSE)
       
-      beta_hat <- fit_original(x_sub, y_sub)
-      beta_bc2 <- bias_correct_add(x_sub, y_sub, beta_hat)
-      beta_bc3 <- bias_correct_equation(x_sub, y_sub, beta_bc2)
+      Xs <- X[id, , drop = FALSE]
+      ys <- y[id]
       
-      list(
-        simple = beta_hat,
-        bc2 = beta_bc2,
-        bc3 = beta_bc3
-      )
+      tmp <- try({
+        
+        theta_hat <- fit_theta(Xs, ys)
+        
+        theta_simple[b, ] <- theta_hat
+        
+        ############################################################
+        ## bc2: theta_hat - B_hat / k_N
+        ############################################################
+        B <- Bhat(theta_hat, Xs, ys)
+        theta_bc_bias[b, ] <- theta_hat - B / k_N
+        
+        ############################################################
+        ## bc3: solve adjusted estimating equation
+        ############################################################
+        theta_bc_equation[b, ] <- solve_bc_equation(theta_hat, Xs, ys)
+        
+      }, silent = TRUE)
       
-    }, error = function(e) {
-      NULL
-    })
-    
-    if (is.null(one_draw)) {
-      
-      bad_draws <- bad_draws + 1
-      
-      if (bad_draws > max_bad_draws) {
-        stop("Too many bad subsamples.")
+      if (!inherits(tmp, "try-error")) {
+        valid_draw <- TRUE
+      } else {
+        bad_draws <- bad_draws + 1
       }
-      
-      next
     }
-    
-    accepted <- accepted + 1
-    
-    sum_simple <- sum_simple + one_draw$simple
-    sum_bc2 <- sum_bc2 + one_draw$bc2
-    sum_bc3 <- sum_bc3 + one_draw$bc3
-    
-    sumsq_simple <- sumsq_simple + one_draw$simple^2
-    sumsq_bc2 <- sumsq_bc2 + one_draw$bc2^2
-    sumsq_bc3 <- sumsq_bc3 + one_draw$bc3^2
   }
   
-  beta_simple <- sum_simple / m_N
-  beta_bc2 <- sum_bc2 / m_N
-  beta_bc3 <- sum_bc3 / m_N
+  colnames(theta_simple)      <- colnames(X)
+  colnames(theta_bc_bias)     <- colnames(X)
+  colnames(theta_bc_equation) <- colnames(X)
   
-  sd_simple <- sqrt(pmax(sumsq_simple / m_N - beta_simple^2, 0))
-  sd_bc2 <- sqrt(pmax(sumsq_bc2 / m_N - beta_bc2^2, 0))
-  sd_bc3 <- sqrt(pmax(sumsq_bc3 / m_N - beta_bc3^2, 0))
+  estimate <- rbind(
+    simple      = colMeans(theta_simple),
+    bc_bias     = colMeans(theta_bc_bias),
+    bc_equation = colMeans(theta_bc_equation)
+  )
+  
+  se_fun <- function(A) {
+    Omega <- cov(A) * (m_N - 1) / m_N
+    sqrt((1 + 1 / alpha_N) * k_N * diag(Omega) / N)
+  }
+  
+  se <- rbind(
+    simple      = se_fun(theta_simple),
+    bc_bias     = se_fun(theta_bc_bias),
+    bc_equation = se_fun(theta_bc_equation)
+  )
+  
+  colnames(se) <- colnames(X)
   
   list(
-    simple = beta_simple,
-    bc2 = beta_bc2,
-    bc3 = beta_bc3,
-    
-    simple_sd = sd_simple,
-    bc2_sd = sd_bc2,
-    bc3_sd = sd_bc3,
-    
+    N = N,
+    k_N = k_N,
+    m_N = m_N,
+    alpha = alpha,
+    estimate = estimate,
+    se = se,
     bad_draws = bad_draws,
-    total_draws = total_draws
-  )
-}
-
-
-############################################################
-## 2. Full-sample estimators
-############################################################
-
-FitFullLogistic <- function(data, y_name = "y") {
-  
-  y <- data[[y_name]]
-  x <- as.matrix(data[, setdiff(names(data), y_name), drop = FALSE])
-  
-  fit <- suppressWarnings(
-    glm.fit(
-      x = x,
-      y = y,
-      family = binomial(link = "logit"),
-      control = glm.control(maxit = 50)
+    total_draws = total_draws,
+    subsample_estimates = list(
+      simple = theta_simple,
+      bc_bias = theta_bc_bias,
+      bc_equation = theta_bc_equation
     )
   )
-  
-  beta <- as.numeric(coef(fit))
-  
-  if (any(!is.finite(beta))) {
-    stop("Full sample logistic failed.")
-  }
-  
-  prob <- fitted(fit)
-  w <- prob * (1 - prob)
-  
-  fisher <- crossprod(x, x * w)
-  cov_hat <- safe_solve(fisher, diag(ncol(x)))
-  se <- sqrt(diag(cov_hat))
-  
-  list(
-    beta = beta,
-    se = se
-  )
-}
-
-
-FitFullLinear <- function(data, y_name = "y") {
-  
-  y <- data[[y_name]]
-  x <- as.matrix(data[, setdiff(names(data), y_name), drop = FALSE])
-  
-  if (qr(x)$rank < ncol(x)) {
-    stop("Full sample linear design is rank deficient.")
-  }
-  
-  fit <- lm.fit(x = x, y = y)
-  beta <- as.numeric(coef(fit))
-  
-  if (any(!is.finite(beta))) {
-    stop("Full sample linear failed.")
-  }
-  
-  resid <- as.numeric(y - x %*% beta)
-  n <- nrow(x)
-  p <- ncol(x)
-  sigma2_hat <- sum(resid^2) / max(n - p, 1)
-  
-  xtx_inv <- safe_solve(crossprod(x), diag(p))
-  se <- sqrt(diag(sigma2_hat * xtx_inv))
-  
-  list(
-    beta = beta,
-    se = se
-  )
-}
-
-
-FitFullEstimator <- function(data,
-                             model_type = "logistic",
-                             y_name = "y") {
-  
-  model_type <- CheckModelType(model_type)
-  
-  if (model_type == "logistic") {
-    return(FitFullLogistic(data = data, y_name = y_name))
-  }
-  
-  if (model_type == "linear") {
-    return(FitFullLinear(data = data, y_name = y_name))
-  }
-  
-  stop("Unknown model_type.")
 }
 
 
 ############################################################
-## 3. Data generation
+## 2. Generate simulated data
 ############################################################
-
-GenerateData <- function(N,
-                         theta0 = c(0, 1),
-                         model_type = "logistic",
-                         noise_sd = 1) {
+GenerateSimulatedData <- function(N = 1000,
+                                  theta = c(0, 1),
+                                  model = c("linear", "logistic"),
+                                  sigma = 1,
+                                  seed = 1) {
   
-  model_type <- CheckModelType(model_type)
+  model <- match.arg(model)
+  set.seed(seed)
   
-  if (length(theta0) != 2) {
-    stop("This simple DGP expects theta0 to have length 2: intercept and x1 coefficient.")
+  p <- length(theta) - 1
+  
+  X <- matrix(rnorm(N * p), nrow = N, ncol = p)
+  colnames(X) <- paste0("x", 1:p)
+  
+  eta <- as.numeric(cbind(1, X) %*% theta)
+  
+  if (model == "linear") {
+    y <- eta + rnorm(N, sd = sigma)
   }
   
-  x1 <- rnorm(N)
-  
-  X <- cbind(
-    intercept = 1,
-    x1 = x1
-  )
-  
-  eta <- as.numeric(X %*% theta0)
-  
-  if (model_type == "logistic") {
-    
-    prob <- plogis(eta)
+  if (model == "logistic") {
+    prob <- 1 / (1 + exp(-eta))
     y <- rbinom(N, size = 1, prob = prob)
-    
-    return(data.frame(
-      y = y,
-      intercept = X[, 1],
-      x1 = X[, 2]
-    ))
   }
   
-  if (model_type == "linear") {
-    
-    if (!is.finite(noise_sd) || noise_sd <= 0) {
-      stop("noise_sd must be positive for linear regression.")
-    }
-    
-    y <- eta + rnorm(N, mean = 0, sd = noise_sd)
-    
-    return(data.frame(
-      y = y,
-      intercept = X[, 1],
-      x1 = X[, 2]
-    ))
+  data <- data.frame(y = y, X)
+  
+  attr(data, "theta_true") <- theta
+  
+  data
+}
+
+
+############################################################
+## 3. Simulation 
+############################################################
+RunSubbaggingSimulation <- function(R = 100,
+                                    seed_start = 1,
+                                    N = 1000,
+                                    theta = c(0, 1),
+                                    k_N = 100,
+                                    alpha = 1,
+                                    model = c("linear", "logistic"),
+                                    sigma = 1,
+                                    output_dir = ".") {
+  
+  model <- match.arg(model)
+  
+  if (!dir.exists(output_dir)) {
+    dir.create(output_dir, recursive = TRUE)
   }
   
-  stop("Unknown model_type.")
-}
-
-
-############################################################
-## 4. One replication, one row output
-############################################################
-
-OneReplication <- function(rep_id,
-                           seed_base,
-                           N,
-                           alpha,
-                           k_N,
-                           m_N,
-                           theta0 = c(0, 1),
-                           model_type = "logistic",
-                           noise_sd = 1) {
+  m_N <- floor(alpha * N / k_N)
   
-  model_type <- CheckModelType(model_type)
+  methods <- c("simple", "bc_bias", "bc_equation")
   
-  seed_index <- seed_base + rep_id
-  set.seed(seed_index)
+  results <- list()
   
-  data <- GenerateData(
-    N = N,
-    theta0 = theta0,
-    model_type = model_type,
-    noise_sd = noise_sd
-  )
+  for (method in methods) {
+    results[[method]] <- NULL
+  }
   
-  k_N <- as.integer(k_N)
-  if (k_N <= 0) stop("k_N must be positive.")
-  
-  m_N <- as.integer(m_N)
-  if (m_N <= 0) stop("m_N must be positive.")
-  
-  full <- FitFullEstimator(
-    data = data,
-    model_type = model_type
-  )
-  
-  sub <- SubbaggingCore(
-    data = data,
-    k_N = k_N,
-    m_N = m_N,
-    model_type = model_type
-  )
-  
-  data.frame(
-    seed_index = seed_index,
-    rep = rep_id,
-    model_type = model_type,
-    noise_sd = ifelse(model_type == "linear", noise_sd, NA_real_),
-    
-    N = N,
-    alpha = alpha,
-    k_N = k_N,
-    m_N = m_N,
-    
-    full_theta1 = full$beta[1],
-    full_theta2 = full$beta[2],
-    full_sd_theta1 = full$se[1],
-    full_sd_theta2 = full$se[2],
-    
-    simple_theta1 = sub$simple[1],
-    simple_theta2 = sub$simple[2],
-    simple_sd_theta1 = sub$simple_sd[1],
-    simple_sd_theta2 = sub$simple_sd[2],
-    
-    bc2_theta1 = sub$bc2[1],
-    bc2_theta2 = sub$bc2[2],
-    bc2_sd_theta1 = sub$bc2_sd[1],
-    bc2_sd_theta2 = sub$bc2_sd[2],
-    
-    bc3_theta1 = sub$bc3[1],
-    bc3_theta2 = sub$bc3[2],
-    bc3_sd_theta1 = sub$bc3_sd[1],
-    bc3_sd_theta2 = sub$bc3_sd[2],
-    
-    bad_draws = sub$bad_draws,
-    total_draws = sub$total_draws,
-    
-    stringsAsFactors = FALSE
-  )
-}
-
-
-############################################################
-## 6. Setting / file name label
-############################################################
-
-SettingName <- function(model_type, N, alpha, k_N, m_N, noise_sd = 1) {
-  
-  model_type <- CheckModelType(model_type)
-  
-  alpha_name <- ifelse(
-    abs(alpha - 1) < 1e-12,
-    "alpha_1",
-    ifelse(
-      abs(alpha - 1 / 3) < 1e-12,
-      "alpha_1over3",
-      paste0("alpha_", alpha)
-    )
-  )
-  
-  noise_name <- ifelse(
-    model_type == "linear",
-    paste0("__noise_sd_", noise_sd),
-    ""
-  )
-  
-  paste0(
-    "model_", model_type,
-    "__N_", N,
-    "__", alpha_name,
-    "__k_N_", k_N,
-    "__m_N_", m_N,
-    noise_name
-  )
-}
-
-
-############################################################
-## 7. Run one setting and write raw file only
-############################################################
-
-RunOneSetting <- function(R,
-                          N,
-                          alpha,
-                          k_N,
-                          m_N,
-                          model_type = "logistic",
-                          theta0 = c(0, 1),
-                          noise_sd = 1,
-                          seed_base = seed,
-                          output_root = "subbagging_results") {
-  
-  model_type <- CheckModelType(model_type)
-  
-  setting_name <- SettingName(
-    model_type = model_type,
-    N = N,
-    alpha = alpha,
-    k_N = k_N,
-    m_N = m_N,
-    noise_sd = noise_sd
-  )
-  
-  dir.create(output_root, recursive = TRUE, showWarnings = FALSE)
-  
-  raw_list <- vector("list", R)
+  ############################################################
+  ## Helper: avoid scientific notation in file names
+  ############################################################
+  plain_number <- function(x) {
+    x <- format(x, scientific = FALSE, trim = TRUE)
+    x <- gsub("\\.", "p", x)
+    x
+  }
   
   for (r in 1:R) {
     
-    message("[", setting_name, "] replication ", r, " / ", R)
+    seed_r <- seed_start + r - 1
     
-    raw_list[[r]] <- OneReplication(
-      rep_id = r,
-      seed_base = seed_base,
+    data_r <- GenerateSimulatedData(
       N = N,
-      alpha = alpha,
-      k_N = k_N,
-      m_N = m_N,
-      theta0 = theta0,
-      model_type = model_type,
-      noise_sd = noise_sd
+      theta = theta,
+      model = model,
+      sigma = sigma,
+      seed = seed_r
     )
+    
+    fit_r <- SubbaggingCore(
+      data = data_r,
+      k_N = k_N,
+      alpha = alpha,
+      model = model,
+      seed = seed_r
+    )
+    
+    coef_names <- colnames(fit_r$estimate)
+    
+    for (method in methods) {
+      
+      estimate_r <- fit_r$estimate[method, ]
+      se_r       <- fit_r$se[method, ]
+      
+      row_r <- data.frame(
+        replication = r,
+        seed = seed_r,
+        N = N,
+        k_N = k_N,
+        m_N = fit_r$m_N,
+        alpha = alpha,
+        model = model,
+        method = method,
+        bad_draws = fit_r$bad_draws,
+        total_draws = fit_r$total_draws
+      )
+      
+      for (j in seq_along(coef_names)) {
+        row_r[[paste0("estimate_", coef_names[j])]] <- estimate_r[j]
+      }
+      
+      for (j in seq_along(coef_names)) {
+        row_r[[paste0("se_", coef_names[j])]] <- se_r[j]
+      }
+      
+      results[[method]] <- rbind(results[[method]], row_r)
+    }
+    
+    cat("Finished replication", r, "with seed", seed_r,
+        "| bad draws:", fit_r$bad_draws,
+        "| total draws:", fit_r$total_draws, "\n")
   }
   
-  raw <- do.call(rbind, raw_list)
+  ############################################################
+  ## Save CSV files
+  ## No scientific notation will appear in file names
+  ############################################################
+  N_name     <- plain_number(N)
+  k_N_name   <- plain_number(k_N)
+  m_N_name   <- plain_number(m_N)
+  alpha_name <- plain_number(alpha)
   
-  noise_file_part <- ifelse(
-    model_type == "linear",
-    paste0("_noise_sd=", noise_sd),
-    ""
+  file_paths <- c()
+  
+  for (method in methods) {
+    
+    file_name <- paste0(
+      "simulation_",
+      "model=", model,
+      "_N=", N_name,
+      "_k_N=", k_N_name,
+      "_m_N=", m_N_name,
+      "_alpha=", alpha_name,
+      "_method=", method,
+      ".csv"
+    )
+    
+    file_path <- file.path(output_dir, file_name)
+    
+    write.csv(results[[method]], file_path, row.names = FALSE)
+    
+    file_paths[method] <- file_path
+  }
+  
+  list(
+    settings = list(
+      R = R,
+      seed_start = seed_start,
+      N = N,
+      theta = theta,
+      k_N = k_N,
+      m_N = m_N,
+      alpha = alpha,
+      model = model,
+      sigma = sigma
+    ),
+    results = results,
+    file_paths = file_paths
   )
-  
-  raw_file_name <- paste0(
-    "model=", model_type,
-    "_N=", N,
-    "_alpha=", alpha,
-    "_k_N=", k_N,
-    "_m_N=", m_N,
-    noise_file_part,
-    ".csv"
-  )
-  
-  output_file <- file.path(output_root, raw_file_name)
-  
-  write.csv(
-    raw,
-    file = output_file,
-    row.names = FALSE
-  )
-  
-  message("Saved CSV file to: ", output_file)
-  
-  invisible(list(
-    raw = raw,
-    output_root = output_root,
-    raw_file_name = raw_file_name
-  ))
 }
 
-
 ############################################################
-## Global run values: one manually defined setting only
-############################################################
-
-seed <- 12345
-R <- 20
-N <- 20000
-alpha <- 1
-
-## Choose one:
-model_type <- "logistic"
-## model_type <- "linear"
-
-theta0 <- c(0, 1)
-
-## Used only when model_type = "linear".
-## Ignored when model_type = "logistic".
-noise_sd <- 1
-
-## Choose the subsample size k_N directly through the formula you want.
-k_N <- floor(N^(5 / 12))
-
-## Choose the number of subsamples m_N directly through the formula you want.
-## Paper option 1:
-m_N <- floor(alpha * N / k_N)
-
-## Paper option 2, if needed later:
-## m_N <- floor(alpha * N^(4 / 3) / k_N)
-
-output_root <- "subbagging_one_setting_results"
-
-
-############################################################
-## Run one setting
+## 4. Implementation 
 ############################################################
 
-RunOneSetting(
+R = 100
+seed_start = 1
+theta = c(1, 2)
+model = "linear"
+sigma = 1
+output_dir = "./Subbagging new"
+N = 500000
+k_N = floor(N^(1/2 + 1/4))
+alpha = 1
+
+sim_linear <- RunSubbaggingSimulation(
   R = R,
+  seed_start = seed_start,
   N = N,
-  alpha = alpha,
+  theta = theta,
   k_N = k_N,
-  m_N = m_N,
-  model_type = model_type,
-  theta0 = theta0,
-  noise_sd = noise_sd,
-  seed_base = seed,
-  output_root = output_root
+  alpha = alpha,
+  model = model,
+  sigma = sigma,
+  output_dir = output_dir
+)
+
+
+R = 100
+seed_start = 1
+theta = c(1, 2)
+model = "logistic"
+sigma = 1
+output_dir = "./Subbagging new"
+N = 500000
+k_N = floor(N^(1/2 + 1/4))
+alpha = 1
+
+sim_logistic <- RunSubbaggingSimulation(
+  R = R,
+  seed_start = seed_start,
+  N = N,
+  theta = theta,
+  k_N = k_N,
+  alpha = alpha,
+  model = model,
+  sigma = sigma,
+  output_dir = output_dir
 )
