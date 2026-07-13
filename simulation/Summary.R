@@ -16,7 +16,9 @@ SummariseSimulationFolder <- function(folder = ".",
     full.names = TRUE
   )
 
-  files <- files[!grepl("summary", basename(files), ignore.case = TRUE)]
+  files <- files[
+    !grepl("summary", basename(files), ignore.case = TRUE)
+  ]
 
   if (length(files) == 0) {
     stop("No simulation CSV files found in this folder.")
@@ -27,17 +29,26 @@ SummariseSimulationFolder <- function(folder = ".",
   ############################################################
   summarise_one_file <- function(file) {
 
-    df <- read.csv(file, check.names = FALSE)
+    df <- read.csv(
+      file,
+      check.names = FALSE
+    )
 
-    estimate_cols <- grep("^estimate_", names(df), value = TRUE)
+    estimate_cols <- grep(
+      "^estimate_",
+      names(df),
+      value = TRUE
+    )
 
     if (length(estimate_cols) != length(theta)) {
       stop(
         paste0(
           "Number of estimate columns does not match length(theta) in file: ",
           basename(file),
-          "\nNumber of estimate columns = ", length(estimate_cols),
-          "\nlength(theta) = ", length(theta)
+          "\nNumber of estimate columns = ",
+          length(estimate_cols),
+          "\nlength(theta) = ",
+          length(theta)
         )
       )
     }
@@ -51,7 +62,10 @@ SummariseSimulationFolder <- function(folder = ".",
         return(NA_real_)
       }
 
-      values <- suppressWarnings(as.numeric(df[[column_name]]))
+      values <- suppressWarnings(
+        as.numeric(df[[column_name]])
+      )
+
       values <- values[is.finite(values)]
 
       if (length(values) == 0) {
@@ -63,6 +77,9 @@ SummariseSimulationFolder <- function(folder = ".",
 
     ############################################################
     ## Timing summaries across replications
+    ##
+    ## Each timing column is summarised separately.
+    ## No timing columns are added together.
     ############################################################
     mean_time_subsampling_seconds <- mean_time(
       "time_subsampling_seconds"
@@ -81,65 +98,81 @@ SummariseSimulationFolder <- function(folder = ".",
     )
 
     ############################################################
-    ## Mean total time for the method represented by this file
-    ##
-    ## simple:
-    ##   subsampling + simple
-    ##
-    ## bc_bias:
-    ##   subsampling + simple + bias correction
-    ##
-    ## bc_equation:
-    ##   subsampling + simple + adjusted-equation solution
+    ## Method represented by the current file
     ############################################################
-    method_name <- as.character(unique(df$method)[1])
-
-    if (method_name == "simple") {
-
-      required_times <- c(
-        mean_time_subsampling_seconds,
-        mean_time_simple_seconds
+    if (!"method" %in% names(df)) {
+      stop(
+        paste0(
+          "Column 'method' is missing from file: ",
+          basename(file)
+        )
       )
-
-    } else if (method_name == "bc_bias") {
-
-      required_times <- c(
-        mean_time_subsampling_seconds,
-        mean_time_simple_seconds,
-        mean_time_bc_bias_seconds
-      )
-
-    } else if (method_name == "bc_equation") {
-
-      required_times <- c(
-        mean_time_subsampling_seconds,
-        mean_time_simple_seconds,
-        mean_time_bc_equation_seconds
-      )
-
-    } else {
-
-      required_times <- numeric(0)
     }
 
-    if (length(required_times) > 0 &&
-        all(is.finite(required_times))) {
-      mean_method_total_seconds <- sum(required_times)
-    } else {
-      mean_method_total_seconds <- NA_real_
+    method_values <- unique(
+      as.character(df$method[!is.na(df$method)])
+    )
+
+    if (length(method_values) == 0) {
+      stop(
+        paste0(
+          "No valid method value found in file: ",
+          basename(file)
+        )
+      )
+    }
+
+    if (length(method_values) > 1) {
+      stop(
+        paste0(
+          "More than one method found in file: ",
+          basename(file),
+          "\nMethods found: ",
+          paste(method_values, collapse = ", ")
+        )
+      )
+    }
+
+    method_name <- method_values[1]
+
+    if (!method_name %in% c(
+      "simple",
+      "bc_bias",
+      "bc_equation"
+    )) {
+      stop(
+        paste0(
+          "Unknown method in file: ",
+          basename(file),
+          "\nMethod found: ",
+          method_name
+        )
+      )
     }
 
     rows <- list()
 
+    ############################################################
+    ## Summarise each parameter
+    ############################################################
     for (j in seq_along(estimate_cols)) {
 
       estimate_col <- estimate_cols[j]
-      se_col <- paste0("se_", sub("^estimate_", "", estimate_col))
+
+      se_col <- paste0(
+        "se_",
+        sub("^estimate_", "", estimate_col)
+      )
 
       true_value <- theta[j]
 
-      estimates_all <- df[[estimate_col]]
-      estimates <- estimates_all[!is.na(estimates_all)]
+      estimates_all <- suppressWarnings(
+        as.numeric(df[[estimate_col]])
+      )
+
+      estimates <- estimates_all[
+        is.finite(estimates_all)
+      ]
 
       if (length(estimates) == 0) {
         next
@@ -147,58 +180,126 @@ SummariseSimulationFolder <- function(folder = ".",
 
       mean_estimate <- mean(estimates)
       bias <- mean_estimate - true_value
-      sd_value <- sd(estimates)
-      rmse <- sqrt(mean((estimates - true_value)^2))
 
+      if (length(estimates) >= 2) {
+        sd_value <- sd(estimates)
+      } else {
+        sd_value <- NA_real_
+      }
+
+      rmse <- sqrt(
+        mean((estimates - true_value)^2)
+      )
+
+      ############################################################
+      ## ASE and coverage probability
+      ############################################################
       if (se_col %in% names(df)) {
 
-        se_values <- df[[se_col]]
-        ase <- mean(se_values, na.rm = TRUE)
+        se_values <- suppressWarnings(
+          as.numeric(df[[se_col]])
+        )
 
-        lower <- df[[estimate_col]] - z_value * df[[se_col]]
-        upper <- df[[estimate_col]] + z_value * df[[se_col]]
+        valid_se <- is.finite(se_values)
 
-        valid <- !is.na(lower) & !is.na(upper)
+        if (sum(valid_se) > 0) {
+          ase <- mean(se_values[valid_se])
+        } else {
+          ase <- NA_real_
+        }
+
+        valid <- is.finite(estimates_all) &
+          is.finite(se_values)
 
         if (sum(valid) > 0) {
+
+          lower <- estimates_all[valid] -
+            z_value * se_values[valid]
+
+          upper <- estimates_all[valid] +
+            z_value * se_values[valid]
+
           cp <- mean(
-            lower[valid] <= true_value &
-              upper[valid] >= true_value
+            lower <= true_value &
+              upper >= true_value
           )
+
         } else {
-          cp <- NA
+          cp <- NA_real_
         }
 
       } else {
-        ase <- NA
-        cp <- NA
+        ase <- NA_real_
+        cp <- NA_real_
       }
 
       ############################################################
       ## Bad draw summaries
       ############################################################
       if ("bad_draws" %in% names(df)) {
-        total_bad_draws <- sum(df$bad_draws, na.rm = TRUE)
-        mean_bad_draws <- mean(df$bad_draws, na.rm = TRUE)
+
+        bad_draw_values <- suppressWarnings(
+          as.numeric(df$bad_draws)
+        )
+
+        bad_draw_values <- bad_draw_values[
+          is.finite(bad_draw_values)
+        ]
+
+        if (length(bad_draw_values) > 0) {
+          mean_bad_draws <- mean(bad_draw_values)
+        } else {
+          mean_bad_draws <- NA_real_
+        }
+
       } else {
-        total_bad_draws <- NA
-        mean_bad_draws <- NA
+        mean_bad_draws <- NA_real_
       }
 
       if ("total_draws" %in% names(df)) {
-        total_draws_sum <- sum(df$total_draws, na.rm = TRUE)
-        mean_total_draws <- mean(df$total_draws, na.rm = TRUE)
+
+        total_draw_values <- suppressWarnings(
+          as.numeric(df$total_draws)
+        )
+
+        total_draw_values <- total_draw_values[
+          is.finite(total_draw_values)
+        ]
+
+        if (length(total_draw_values) > 0) {
+          mean_total_draws <- mean(total_draw_values)
+        } else {
+          mean_total_draws <- NA_real_
+        }
+
       } else {
-        total_draws_sum <- NA
-        mean_total_draws <- NA
+        mean_total_draws <- NA_real_
       }
 
-      if (!is.na(total_bad_draws) &&
-          !is.na(total_draws_sum) &&
-          total_draws_sum > 0) {
-        bad_draw_rate <- total_bad_draws / total_draws_sum
+      ############################################################
+      ## Seed range
+      ############################################################
+      if ("seed" %in% names(df)) {
+
+        seed_values <- suppressWarnings(
+          as.numeric(df$seed)
+        )
+
+        seed_values <- seed_values[
+          is.finite(seed_values)
+        ]
+
+        if (length(seed_values) > 0) {
+          seed_min <- min(seed_values)
+          seed_max <- max(seed_values)
+        } else {
+          seed_min <- NA_real_
+          seed_max <- NA_real_
+        }
+
       } else {
-        bad_draw_rate <- NA
+        seed_min <- NA_real_
+        seed_max <- NA_real_
       }
 
       ############################################################
@@ -214,29 +315,29 @@ SummariseSimulationFolder <- function(folder = ".",
         parameter_index = j,
         true_value = true_value,
         n_rep = nrow(df),
-        seed_min = min(df$seed, na.rm = TRUE),
-        seed_max = max(df$seed, na.rm = TRUE),
+        seed_min = seed_min,
+        seed_max = seed_max,
         mean_estimate = mean_estimate,
         BIAS = bias,
         SD = sd_value,
         ASE = ase,
         RMSE = rmse,
         CP = cp,
-        total_bad_draws = total_bad_draws,
         mean_bad_draws = mean_bad_draws,
-        total_draws_sum = total_draws_sum,
         mean_total_draws = mean_total_draws,
-        bad_draw_rate = bad_draw_rate,
+
         mean_time_subsampling_seconds =
           mean_time_subsampling_seconds,
+
         mean_time_simple_seconds =
           mean_time_simple_seconds,
+
         mean_time_bc_bias_seconds =
           mean_time_bc_bias_seconds,
+
         mean_time_bc_equation_seconds =
           mean_time_bc_equation_seconds,
-        mean_method_total_seconds =
-          mean_method_total_seconds,
+
         source_file = basename(file),
         check.names = FALSE
       )
@@ -257,38 +358,59 @@ SummariseSimulationFolder <- function(folder = ".",
   all_rows <- list()
 
   for (i in seq_along(files)) {
-    cat("Processing:", basename(files[i]), "\n")
+
+    cat(
+      "Processing:",
+      basename(files[i]),
+      "\n"
+    )
+
     all_rows[[i]] <- summarise_one_file(files[i])
   }
 
-  all_rows <- all_rows[!vapply(all_rows, is.null, logical(1))]
+  all_rows <- all_rows[
+    !vapply(all_rows, is.null, logical(1))
+  ]
 
   if (length(all_rows) == 0) {
     stop("No valid simulation results could be summarised.")
   }
 
-  summary_df <- do.call(rbind, all_rows)
+  summary_df <- do.call(
+    rbind,
+    all_rows
+  )
 
   ############################################################
   ## Sort output
   ############################################################
-  summary_df <- summary_df[order(
-    summary_df$model,
-    summary_df$N,
-    summary_df$alpha,
-    summary_df$k_N,
-    summary_df$m_N,
-    summary_df$method,
-    summary_df$parameter_index
-  ), ]
+  summary_df <- summary_df[
+    order(
+      summary_df$model,
+      summary_df$N,
+      summary_df$alpha,
+      summary_df$k_N,
+      summary_df$m_N,
+      summary_df$method,
+      summary_df$parameter_index
+    ),
+  ]
 
   rownames(summary_df) <- NULL
 
   ############################################################
   ## Save output
   ############################################################
-  output_path <- file.path(folder, output_file)
-  write.csv(summary_df, output_path, row.names = FALSE)
+  output_path <- file.path(
+    folder,
+    output_file
+  )
+
+  write.csv(
+    summary_df,
+    output_path,
+    row.names = FALSE
+  )
 
   cat("\nDONE.\n")
   cat("Files processed:", length(files), "\n")
