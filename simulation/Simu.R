@@ -7,7 +7,7 @@ SubbaggingCore <- function(data, k_N, alpha,
   # model settings
   model <- match.arg(model)
   set.seed(seed)
-  
+  # adding the intercept
   y <- as.numeric(data[, 1])
   X <- as.matrix(data[, -1])
   X <- cbind(Intercept = 1, X)
@@ -19,7 +19,7 @@ SubbaggingCore <- function(data, k_N, alpha,
   alpha_N <- k_N * m_N / N
   
   ############################################################
-  ## M-estimator on one subsample
+  ## Z-estimator on one subsample
   ############################################################
   fit_theta <- function(Xs, ys) {
     if (model == "linear") {
@@ -127,6 +127,14 @@ SubbaggingCore <- function(data, k_N, alpha,
   bad_draws <- 0
   total_draws <- 0
   
+  ############################################################
+  ## Timing accumulators, in seconds
+  ############################################################
+  time_subsampling_seconds <- 0
+  time_simple_seconds <- 0
+  time_bc_bias_seconds <- 0
+  time_bc_equation_seconds <- 0
+  
   for (b in 1:m_N) {
     
     valid_draw <- FALSE
@@ -135,35 +143,69 @@ SubbaggingCore <- function(data, k_N, alpha,
       
       total_draws <- total_draws + 1
       
-      id <- sample(1:N, k_N, replace = FALSE)
+      ############################################################
+      ## Time subsample drawing and extraction
+      ############################################################
+      time_start <- proc.time()[["elapsed"]]
       
+      id <- sample(1:N, k_N, replace = FALSE)
       Xs <- X[id, , drop = FALSE]
       ys <- y[id]
       
-      tmp <- try({
-        
-        theta_hat <- fit_theta(Xs, ys)
-        
-        theta_simple[b, ] <- theta_hat
-        
-        ############################################################
-        ## bc2: theta_hat - B_hat / k_N
-        ############################################################
-        B <- Bhat(theta_hat, Xs, ys)
-        theta_bc_bias[b, ] <- theta_hat - B / k_N
-        
-        ############################################################
-        ## bc3: solve adjusted estimating equation
-        ############################################################
-        theta_bc_equation[b, ] <- solve_bc_equation(theta_hat, Xs, ys)
-        
-      }, silent = TRUE)
+      time_subsampling_seconds <- time_subsampling_seconds +
+        (proc.time()[["elapsed"]] - time_start)
       
-      if (!inherits(tmp, "try-error")) {
-        valid_draw <- TRUE
-      } else {
+      ############################################################
+      ## Time simple subsample estimator
+      ############################################################
+      time_start <- proc.time()[["elapsed"]]
+      theta_result <- try(fit_theta(Xs, ys), silent = TRUE)
+      time_simple_seconds <- time_simple_seconds +
+        (proc.time()[["elapsed"]] - time_start)
+      
+      if (inherits(theta_result, "try-error")) {
         bad_draws <- bad_draws + 1
+        next
       }
+      
+      theta_hat <- theta_result
+      
+      ############################################################
+      ## Time bias-correction calculation
+      ############################################################
+      time_start <- proc.time()[["elapsed"]]
+      B_result <- try(Bhat(theta_hat, Xs, ys), silent = TRUE)
+      time_bc_bias_seconds <- time_bc_bias_seconds +
+        (proc.time()[["elapsed"]] - time_start)
+      
+      if (inherits(B_result, "try-error")) {
+        bad_draws <- bad_draws + 1
+        next
+      }
+      
+      theta_bias <- theta_hat - B_result / k_N
+      
+      ############################################################
+      ## Time adjusted estimating-equation solution
+      ############################################################
+      time_start <- proc.time()[["elapsed"]]
+      theta_equation_result <- try(
+        solve_bc_equation(theta_hat, Xs, ys),
+        silent = TRUE
+      )
+      time_bc_equation_seconds <- time_bc_equation_seconds +
+        (proc.time()[["elapsed"]] - time_start)
+      
+      if (inherits(theta_equation_result, "try-error")) {
+        bad_draws <- bad_draws + 1
+        next
+      }
+      
+      theta_simple[b, ] <- theta_hat
+      theta_bc_bias[b, ] <- theta_bias
+      theta_bc_equation[b, ] <- theta_equation_result
+      
+      valid_draw <- TRUE
     }
   }
   
@@ -171,10 +213,28 @@ SubbaggingCore <- function(data, k_N, alpha,
   colnames(theta_bc_bias)     <- colnames(X)
   colnames(theta_bc_equation) <- colnames(X)
   
+  ############################################################
+  ## Include final averaging time for each estimator
+  ############################################################
+  time_start <- proc.time()[["elapsed"]]
+  estimate_simple <- colMeans(theta_simple)
+  time_simple_seconds <- time_simple_seconds +
+    (proc.time()[["elapsed"]] - time_start)
+  
+  time_start <- proc.time()[["elapsed"]]
+  estimate_bc_bias <- colMeans(theta_bc_bias)
+  time_bc_bias_seconds <- time_bc_bias_seconds +
+    (proc.time()[["elapsed"]] - time_start)
+  
+  time_start <- proc.time()[["elapsed"]]
+  estimate_bc_equation <- colMeans(theta_bc_equation)
+  time_bc_equation_seconds <- time_bc_equation_seconds +
+    (proc.time()[["elapsed"]] - time_start)
+  
   estimate <- rbind(
-    simple      = colMeans(theta_simple),
-    bc_bias     = colMeans(theta_bc_bias),
-    bc_equation = colMeans(theta_bc_equation)
+    simple      = estimate_simple,
+    bc_bias     = estimate_bc_bias,
+    bc_equation = estimate_bc_equation
   )
   
   se_fun <- function(A) {
@@ -199,6 +259,12 @@ SubbaggingCore <- function(data, k_N, alpha,
     se = se,
     bad_draws = bad_draws,
     total_draws = total_draws,
+    timing = list(
+      subsampling_seconds = time_subsampling_seconds,
+      simple_seconds = time_simple_seconds,
+      bc_bias_seconds = time_bc_bias_seconds,
+      bc_equation_seconds = time_bc_equation_seconds
+    ),
     subsample_estimates = list(
       simple = theta_simple,
       bc_bias = theta_bc_bias,
@@ -319,7 +385,11 @@ RunSubbaggingSimulation <- function(R = 100,
         model = model,
         method = method,
         bad_draws = fit_r$bad_draws,
-        total_draws = fit_r$total_draws
+        total_draws = fit_r$total_draws,
+        time_subsampling_seconds = fit_r$timing$subsampling_seconds,
+        time_simple_seconds = fit_r$timing$simple_seconds,
+        time_bc_bias_seconds = fit_r$timing$bc_bias_seconds,
+        time_bc_equation_seconds = fit_r$timing$bc_equation_seconds
       )
       
       for (j in seq_along(coef_names)) {
@@ -335,7 +405,12 @@ RunSubbaggingSimulation <- function(R = 100,
     
     cat("Finished replication", r, "with seed", seed_r,
         "| bad draws:", fit_r$bad_draws,
-        "| total draws:", fit_r$total_draws, "\n")
+        "| total draws:", fit_r$total_draws,
+        "| subsampling:", round(fit_r$timing$subsampling_seconds, 4),
+        "| simple:", round(fit_r$timing$simple_seconds, 4),
+        "| bc bias:", round(fit_r$timing$bc_bias_seconds, 4),
+        "| bc equation:", round(fit_r$timing$bc_equation_seconds, 4),
+        "seconds\n")
   }
   
   ############################################################
@@ -396,7 +471,7 @@ theta = c(1, 2)
 model = "linear"
 sigma = 1
 output_dir = "./Subbagging new"
-N = 500000
+N = 20000
 k_N = floor(N^(1/2 + 1/4))
 alpha = 1
 
@@ -419,7 +494,7 @@ theta = c(1, 2)
 model = "logistic"
 sigma = 1
 output_dir = "./Subbagging new"
-N = 500000
+N = 20000
 k_N = floor(N^(1/2 + 1/4))
 alpha = 1
 
