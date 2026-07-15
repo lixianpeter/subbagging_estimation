@@ -1,16 +1,13 @@
-############################################################
-## Required package
-############################################################
-
+#########################################################---
+# Required package ----
+#########################################################---
 if (!requireNamespace("nleqslv", quietly = TRUE)) {
   install.packages("nleqslv")
 }
 
-
-############################################################
-## 1. Simulation settings
-############################################################
-
+#########################################################---
+# 1. Simulation settings ----
+#########################################################---
 ## Choose one model: "linear" or "logistic"
 model <- "linear"
 
@@ -43,11 +40,9 @@ alpha <- 1
 ## Output folder
 output_dir <- "./Subbagging new"
 
-
-############################################################
-## 2. Derived simulation settings
-############################################################
-
+#########################################################---
+# 2. Derived simulation settings ----
+#########################################################---
 ## Prevent a spelling error from silently running the wrong
 ## model or estimation method.
 model <- match.arg(model, c("linear", "logistic"))
@@ -62,14 +57,11 @@ if (!dir.exists(output_dir)) {
   dir.create(output_dir, recursive = TRUE)
 }
 
+#########################################################---
+# 3. Functions used in the simulation ----
+## 3.1 Fit the ordinary estimator on one data set ----
+#########################################################---
 
-############################################################
-## 3. Define the functions used in the simulation
-############################################################
-
-############################################################
-## Fit the ordinary estimator on one data set
-############################################################
 
 FitTheta <- function(Xs, ys, model) {
   
@@ -98,11 +90,9 @@ FitTheta <- function(Xs, ys, model) {
   theta_hat
 }
 
-
-############################################################
-## Compute the estimating functions and derivative matrix
-############################################################
-
+#########################################################---
+## 3.2 Compute the estimating functions and derivative matrix ----
+#########################################################---
 Moments <- function(theta, Xs, ys, model) {
   
   n <- nrow(Xs)
@@ -132,11 +122,9 @@ Moments <- function(theta, Xs, ys, model) {
   )
 }
 
-
-############################################################
-## Estimate the bias term on one subsample
-############################################################
-
+#########################################################---
+## 3.3 Estimate the bias term on one subsample ----
+#########################################################---
 Bhat <- function(theta, Xs, ys, model) {
   
   n <- nrow(Xs)
@@ -185,11 +173,9 @@ Bhat <- function(theta, Xs, ys, model) {
   B
 }
 
-
-############################################################
-## Adjusted estimating equation
-############################################################
-
+#########################################################---
+## 3.4 Adjusted estimating equation ----
+#########################################################---
 AdjustedScore <- function(theta, Xs, ys, model) {
   
   M <- Moments(theta, Xs, ys, model)
@@ -207,11 +193,9 @@ AdjustedScore <- function(theta, Xs, ys, model) {
   adjusted_score
 }
 
-
-############################################################
-## Solve the adjusted estimating equation
-############################################################
-
+#########################################################---
+## 3.5 Solve the adjusted estimating equation ----
+#########################################################---
 SolveBCEquation <- function(theta_start, Xs, ys, model) {
   
   solution <- nleqslv(
@@ -249,11 +233,9 @@ SolveBCEquation <- function(theta_start, Xs, ys, model) {
   theta_bc
 }
 
-
-############################################################
-## Calculate the full-data asymptotic standard deviation
-############################################################
-
+#########################################################---
+## 3.6 Calculate the full-data asymptotic standard deviation ----
+#########################################################---
 CalculateASD <- function(X, y, true_theta, model) {
   
   ## This is the simulation benchmark based on the full-data
@@ -276,11 +258,9 @@ CalculateASD <- function(X, y, true_theta, model) {
   sqrt(diag(Xi_hat) / n)
 }
 
-
-############################################################
-## Calculate the subbagging standard error
-############################################################
-
+#########################################################---
+## 3.7 Calculate the subbagging standard error ----
+#########################################################---
 CalculateSSE <- function(theta_subsample, N, k_N) {
   
   ## Omega_hat uses the denominator m_N, matching the paper's
@@ -301,21 +281,17 @@ CalculateSSE <- function(theta_subsample, N, k_N) {
   )
 }
 
-
-############################################################
-## Format numbers used in the output filename
-############################################################
-
+#########################################################---
+## 3.8 Format numbers used in the output filename ----
+#########################################################---
 PlainNumber <- function(x) {
   x <- format(x, scientific = FALSE, trim = TRUE)
   gsub("\\.", "p", x)
 }
 
-
-############################################################
-## 4. Output filename
-############################################################
-
+#########################################################---
+# 4. Output filename ----
+#########################################################---
 file_name <- paste0(
   "simulation_",
   "model=", model,
@@ -329,21 +305,17 @@ file_name <- paste0(
 
 file_path <- file.path(output_dir, file_name)
 
-
-############################################################
-## 5. Main simulation loop
-############################################################
-
+#########################################################---
+# 5. Main simulation loop ----
+#########################################################---
 for (r in seq_len(R)) {
   
   seed_r <- seed_start + r - 1
   set.seed(seed_r)
   
-  
-  ############################################################
-  ## Generate one full dataset
-  ############################################################
-  
+  #########################################################---
+  ## 5.1 Generate one full dataset ----
+  #########################################################---
   p <- length(true_theta) - 1
   
   X_covariates <- matrix(
@@ -368,11 +340,9 @@ for (r in seq_len(R)) {
     y <- rbinom(N, size = 1, prob = probability)
   }
   
-  
-  ############################################################
-  ## Full-data ASD evaluated at the true parameter
-  ############################################################
-  
+  #########################################################---
+  ## 5.2 Full-data ASD evaluated at the true parameter ----
+  #########################################################---
   asd <- CalculateASD(
     X = X,
     y = y,
@@ -380,11 +350,9 @@ for (r in seq_len(R)) {
     model = model
   )
   
-  
-  ############################################################
-  ## Storage for the selected subbagging estimator
-  ############################################################
-  
+  #########################################################---
+  ## 5.3 Storage for the selected subbagging estimator ----
+  #########################################################---
   coefficient_names <- colnames(X)
   d <- ncol(X)
   
@@ -398,22 +366,18 @@ for (r in seq_len(R)) {
   bad_draws <- 0
   total_draws <- 0
   
-  
-  ############################################################
-  ## Start timing the selected subbagging method
-  ############################################################
-  
+  #########################################################---
+  ## 5.4 Start timing the selected subbagging method ----
+  #########################################################---
   ## Resetting the seed ensures that separate runs of the
   ## three methods use the same sequence of subsamples.
   set.seed(seed_r)
   
   time_start <- proc.time()[["elapsed"]]
   
-  
-  ############################################################
-  ## Draw and process m_N valid subsamples
-  ############################################################
-  
+  #########################################################---
+  ## 5.5 Draw and process m_N valid subsamples ----
+  #########################################################---
   for (b in seq_len(m_N)) {
     
     valid_draw <- FALSE
@@ -431,11 +395,9 @@ for (r in seq_len(R)) {
       Xs <- X[subsample_id, , drop = FALSE]
       ys <- y[subsample_id]
       
-      
-      ##########################################################
-      ## Apply the selected estimator to this subsample
-      ##########################################################
-      
+      #########################################################---
+      ### 5.5.1 Apply the selected estimator to this subsample ----
+      #########################################################---
       theta_result <- try({
         
         theta_hat <- FitTheta(Xs, ys, model)
@@ -461,11 +423,9 @@ for (r in seq_len(R)) {
         
       }, silent = TRUE)
       
-      
-      ##########################################################
-      ## Redraw only when the selected estimator fails
-      ##########################################################
-      
+      #########################################################---
+      ### 5.5.2 Redraw only when the selected estimator fails ----
+      #########################################################---
       if (inherits(theta_result, "try-error")) {
         bad_draws <- bad_draws + 1
         next
@@ -476,26 +436,20 @@ for (r in seq_len(R)) {
     }
   }
   
-  
-  ############################################################
-  ## Average the m_N subsample estimates
-  ############################################################
-  
+  #########################################################---
+  ## 5.6 Average the m_N subsample estimates ----
+  #########################################################---
   estimate <- colMeans(theta_subsample)
   
-  
-  ############################################################
-  ## End timing
-  ############################################################
-  
+  #########################################################---
+  ## 5.7 End timing ----
+  #########################################################---
   time_end <- proc.time()[["elapsed"]]
   time_total_seconds <- time_end - time_start
   
-  
-  ############################################################
-  ## Calculate SSE and variance-inflation adjustments
-  ############################################################
-  
+  #########################################################---
+  ## 5.8 Calculate SSE and variance-inflation adjustments ----
+  #########################################################---
   sse <- CalculateSSE(
     theta_subsample = theta_subsample,
     N = N,
@@ -506,11 +460,9 @@ for (r in seq_len(R)) {
   adjusted_asd <- adjustment_factor * asd
   adjusted_sse <- adjustment_factor * sse
   
-  
-  ############################################################
-  ## Save this replication
-  ############################################################
-  
+  #########################################################---
+  ## 5.9 Save this replication ----
+  #########################################################---
   result <- data.frame(
     replication = r,
     seed = seed_r,
@@ -569,10 +521,9 @@ for (r in seq_len(R)) {
   )
 }
 
-
-############################################################
-## 6. Completion message
-############################################################
-
+#########################################################---
+# 6. Completion message ----
+#########################################################---
 cat("\nSimulation completed.\n")
 cat("Output file:", file_path, "\n")
+
