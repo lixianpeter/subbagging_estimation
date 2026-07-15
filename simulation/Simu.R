@@ -8,223 +8,410 @@ if (!requireNamespace("nleqslv", quietly = TRUE)) {
 
 
 ############################################################
-## 1. Subbagging core
+## 1. Simulation settings
 ############################################################
 
-SubbaggingCore <- function(data, k_N, alpha,
-                           model = c("linear", "logistic"),
-                           seed = 1) {
+## Choose one model: "linear" or "logistic"
+model <- "linear"
+
+## Choose one estimator:
+## "simple", "bc_bias", or "bc_equation"
+method <- "bc_equation"
+
+## Number of simulation replications
+R <- 100
+
+## Seed for the first replication
+seed_start <- 1
+
+## True parameter, including the intercept
+true_theta <- c(1, 2)
+
+## Error standard deviation for linear regression
+sigma <- 1
+
+## Full sample size
+N <- 20000
+
+## Subsample size
+k_N <- floor(N^(1 / 2 + 1 / 4))
+
+## Controls the number of subsamples:
+## m_N = floor(alpha * N / k_N)
+alpha <- 1
+
+## Output folder
+output_dir <- "./Subbagging new"
+
+
+############################################################
+## 2. Derived simulation settings
+############################################################
+
+## Prevent a spelling error from silently running the wrong
+## model or estimation method.
+model <- match.arg(model, c("linear", "logistic"))
+method <- match.arg(method, c("simple", "bc_bias", "bc_equation"))
+
+m_N <- floor(alpha * N / k_N)
+
+## Effective value after applying floor() to m_N.
+alpha_N <- k_N * m_N / N
+
+if (!dir.exists(output_dir)) {
+  dir.create(output_dir, recursive = TRUE)
+}
+
+
+############################################################
+## 3. Define the functions used in the simulation
+############################################################
+
+############################################################
+## Fit the ordinary estimator on one data set
+############################################################
+
+FitTheta <- function(Xs, ys, model) {
   
-  model <- match.arg(model)
-  set.seed(seed)
+  if (model == "linear") {
+    theta_hat <- lm.fit(Xs, ys)$coefficients
+  } else {
+    fit <- suppressWarnings(
+      glm.fit(Xs, ys, family = binomial())
+    )
+    
+    if (!isTRUE(fit$converged)) {
+      stop("Logistic regression did not converge.")
+    }
+    
+    theta_hat <- fit$coefficients
+  }
   
-  y <- as.numeric(data[, 1])
-  X <- as.matrix(data[, -1])
-  X <- cbind(Intercept = 1, X)
+  theta_hat <- as.numeric(theta_hat)
   
-  N <- nrow(X)
+  ## A singular regression fit can return non-finite
+  ## coefficient estimates.
+  if (any(!is.finite(theta_hat))) {
+    stop("The estimator is not finite.")
+  }
+  
+  theta_hat
+}
+
+
+############################################################
+## Compute the estimating functions and derivative matrix
+############################################################
+
+Moments <- function(theta, Xs, ys, model) {
+  
+  n <- nrow(Xs)
+  eta <- as.numeric(Xs %*% theta)
+  
+  if (model == "linear") {
+    mu <- eta
+    w <- rep(1, n)
+    h <- rep(0, n)
+  } else {
+    mu <- plogis(eta)
+    w <- mu * (1 - mu)
+    h <- w * (1 - 2 * mu)
+  }
+  
+  ## Individual estimating functions psi_i(theta).
+  psi <- Xs * as.numeric(ys - mu)
+  
+  ## Sample derivative matrix V_hat(theta).
+  V <- -crossprod(Xs, Xs * w) / n
+  
+  list(
+    psi = psi,
+    V = V,
+    w = w,
+    h = h
+  )
+}
+
+
+############################################################
+## Estimate the bias term on one subsample
+############################################################
+
+Bhat <- function(theta, Xs, ys, model) {
+  
+  n <- nrow(Xs)
+  d <- ncol(Xs)
+  
+  M <- Moments(theta, Xs, ys, model)
+  V <- M$V
+  
+  ## The bias formula requires V to be invertible.
+  if (!is.finite(rcond(V)) || rcond(V) < 1e-12) {
+    stop("V is singular or numerically ill-conditioned.")
+  }
+  
+  V_inverse <- solve(V)
+  
+  psi <- M$psi
+  A <- psi %*% t(V_inverse)
+  XA <- rowSums(Xs * A)
+  
+  D_part <- colMeans(Xs * (-M$w * XA))
+  V_part <- as.numeric(V %*% colMeans(A))
+  term1 <- -(D_part - V_part)
+  
+  Q <- crossprod(A) / n
+  term2 <- rep(0, d)
+  
+  if (model == "logistic") {
+    for (j in seq_len(d)) {
+      H_j <- -crossprod(
+        Xs,
+        Xs * (M$h * Xs[, j])
+      ) / n
+      
+      term2[j] <- 0.5 * sum(H_j * Q)
+    }
+  }
+  
+  B <- -as.numeric(
+    V_inverse %*% (term1 + term2)
+  )
+  
+  if (any(!is.finite(B))) {
+    stop("The estimated bias term is not finite.")
+  }
+  
+  B
+}
+
+
+############################################################
+## Adjusted estimating equation
+############################################################
+
+AdjustedScore <- function(theta, Xs, ys, model) {
+  
+  M <- Moments(theta, Xs, ys, model)
+  score <- colSums(M$psi)
+  B <- Bhat(theta, Xs, ys, model)
+  
+  adjusted_score <- as.numeric(
+    score + M$V %*% B
+  )
+  
+  if (any(!is.finite(adjusted_score))) {
+    stop("The adjusted score is not finite.")
+  }
+  
+  adjusted_score
+}
+
+
+############################################################
+## Solve the adjusted estimating equation
+############################################################
+
+SolveBCEquation <- function(theta_start, Xs, ys, model) {
+  
+  solution <- nleqslv(
+    x = theta_start,
+    fn = function(theta) {
+      AdjustedScore(theta, Xs, ys, model)
+    },
+    method = "Broyden",
+    global = "dbldog",
+    control = list(
+      ftol = 1e-8,
+      xtol = 1e-8,
+      maxit = 200,
+      allowSingular = FALSE
+    )
+  )
+  
+  theta_bc <- as.numeric(solution$x)
+  
+  ## termcd 1 or 2 indicates convergence in nleqslv.
+  if (!(solution$termcd %in% c(1, 2))) {
+    stop("The adjusted estimating equation did not converge.")
+  }
+  
+  if (any(!is.finite(theta_bc))) {
+    stop("The adjusted estimating-equation estimate is not finite.")
+  }
+  
+  final_score <- AdjustedScore(theta_bc, Xs, ys, model)
+  
+  if (max(abs(final_score)) > 1e-6) {
+    stop("The adjusted estimating-equation residual is too large.")
+  }
+  
+  theta_bc
+}
+
+
+############################################################
+## Calculate the full-data asymptotic standard deviation
+############################################################
+
+CalculateASD <- function(X, y, true_theta, model) {
+  
+  ## This is the simulation benchmark based on the full-data
+  ## sandwich variance evaluated at the known true parameter.
+  n <- nrow(X)
+  M <- Moments(true_theta, X, y, model)
+  
+  V_hat <- M$V
+  Sigma_hat <- crossprod(M$psi) / n
+  
+  if (!is.finite(rcond(V_hat)) || rcond(V_hat) < 1e-12) {
+    stop("The full-data derivative matrix is singular.")
+  }
+  
+  V_inverse <- solve(V_hat)
+  Xi_hat <- V_inverse %*%
+    Sigma_hat %*%
+    t(V_inverse)
+  
+  sqrt(diag(Xi_hat) / n)
+}
+
+
+############################################################
+## Calculate the subbagging standard error
+############################################################
+
+CalculateSSE <- function(theta_subsample, N, k_N) {
+  
+  ## Omega_hat uses the denominator m_N, matching the paper's
+  ## subbagging variance estimator.
+  theta_average <- colMeans(theta_subsample)
+  centered_theta <- sweep(
+    theta_subsample,
+    MARGIN = 2,
+    STATS = theta_average,
+    FUN = "-"
+  )
+  
+  m_N <- nrow(theta_subsample)
+  Omega_hat <- crossprod(centered_theta) / m_N
+  
+  sqrt(
+    k_N * diag(Omega_hat) / N
+  )
+}
+
+
+############################################################
+## Format numbers used in the output filename
+############################################################
+
+PlainNumber <- function(x) {
+  x <- format(x, scientific = FALSE, trim = TRUE)
+  gsub("\\.", "p", x)
+}
+
+
+############################################################
+## 4. Output filename
+############################################################
+
+file_name <- paste0(
+  "simulation_",
+  "model=", model,
+  "_N=", PlainNumber(N),
+  "_k_N=", PlainNumber(k_N),
+  "_m_N=", PlainNumber(m_N),
+  "_alpha=", PlainNumber(alpha),
+  "_method=", method,
+  ".csv"
+)
+
+file_path <- file.path(output_dir, file_name)
+
+
+############################################################
+## 5. Main simulation loop
+############################################################
+
+for (r in seq_len(R)) {
+  
+  seed_r <- seed_start + r - 1
+  set.seed(seed_r)
+  
+  
+  ############################################################
+  ## Generate one full dataset
+  ############################################################
+  
+  p <- length(true_theta) - 1
+  
+  X_covariates <- matrix(
+    rnorm(N * p),
+    nrow = N,
+    ncol = p
+  )
+  
+  colnames(X_covariates) <- paste0("x", seq_len(p))
+  
+  X <- cbind(
+    Intercept = 1,
+    X_covariates
+  )
+  
+  eta <- as.numeric(X %*% true_theta)
+  
+  if (model == "linear") {
+    y <- eta + rnorm(N, mean = 0, sd = sigma)
+  } else {
+    probability <- plogis(eta)
+    y <- rbinom(N, size = 1, prob = probability)
+  }
+  
+  
+  ############################################################
+  ## Full-data ASD evaluated at the true parameter
+  ############################################################
+  
+  asd <- CalculateASD(
+    X = X,
+    y = y,
+    true_theta = true_theta,
+    model = model
+  )
+  
+  
+  ############################################################
+  ## Storage for the selected subbagging estimator
+  ############################################################
+  
+  coefficient_names <- colnames(X)
   d <- ncol(X)
   
-  m_N <- floor(alpha * N / k_N)
-  alpha_N <- k_N * m_N / N
-  
-  ############################################################
-  ## Z-estimator on one subsample
-  ############################################################
-  
-  fit_theta <- function(Xs, ys) {
-    
-    if (model == "linear") {
-      beta <- lm.fit(Xs, ys)$coefficients
-    } else {
-      fit <- suppressWarnings(
-        glm.fit(Xs, ys, family = binomial())
-      )
-      
-      if (!isTRUE(fit$converged)) {
-        stop("logistic fit did not converge")
-      }
-      
-      beta <- fit$coefficients
-    }
-    
-    beta <- as.numeric(beta)
-    
-    if (any(!is.finite(beta))) {
-      stop("bad fit")
-    }
-    
-    beta
-  }
-  
-  ############################################################
-  ## Compute psi, V, and B_hat
-  ############################################################
-  
-  moments <- function(theta, Xs, ys) {
-    
-    n <- nrow(Xs)
-    eta <- as.numeric(Xs %*% theta)
-    
-    if (model == "linear") {
-      mu <- eta
-      w <- rep(1, n)
-      h <- rep(0, n)
-    } else {
-      mu <- plogis(eta)
-      w <- mu * (1 - mu)
-      h <- w * (1 - 2 * mu)
-    }
-    
-    psi <- Xs * as.numeric(ys - mu)
-    V <- -crossprod(Xs, Xs * w) / n
-    
-    list(
-      psi = psi,
-      V = V,
-      w = w,
-      h = h
-    )
-  }
-  
-  Bhat <- function(theta, Xs, ys) {
-    
-    n <- nrow(Xs)
-    d <- ncol(Xs)
-    
-    M <- moments(theta, Xs, ys)
-    V <- M$V
-    
-    if (!is.finite(rcond(V)) || rcond(V) < 1e-12) {
-      stop("V is singular or numerically ill-conditioned")
-    }
-    
-    Vinv <- solve(V)
-    
-    psi <- M$psi
-    A <- psi %*% t(Vinv)
-    
-    XA <- rowSums(Xs * A)
-    
-    D_part <- colMeans(Xs * (-M$w * XA))
-    V_part <- as.numeric(V %*% colMeans(A))
-    
-    term1 <- -(D_part - V_part)
-    
-    Q <- crossprod(A) / n
-    term2 <- rep(0, d)
-    
-    if (model == "logistic") {
-      for (j in seq_len(d)) {
-        Hj <- -crossprod(
-          Xs,
-          Xs * (M$h * Xs[, j])
-        ) / n
-        
-        term2[j] <- 0.5 * sum(Hj * Q)
-      }
-    }
-    
-    B <- -as.numeric(Vinv %*% (term1 + term2))
-    
-    if (any(!is.finite(B))) {
-      stop("bad Bhat")
-    }
-    
-    B
-  }
-  
-  ############################################################
-  ## Adjusted estimating equation
-  ############################################################
-  
-  adjusted_score <- function(theta, Xs, ys) {
-    
-    M <- moments(theta, Xs, ys)
-    score <- colSums(M$psi)
-    B <- Bhat(theta, Xs, ys)
-    
-    adjusted_value <- as.numeric(score + M$V %*% B)
-    
-    if (any(!is.finite(adjusted_value))) {
-      stop("non-finite adjusted score")
-    }
-    
-    adjusted_value
-  }
-  
-  ############################################################
-  ## Solve adjusted_score(theta) = 0 directly using nleqslv
-  ############################################################
-  
-  solve_bc_equation <- function(theta_start, Xs, ys) {
-    
-    result <- nleqslv::nleqslv(
-      x = theta_start,
-      fn = function(theta) {
-        adjusted_score(theta, Xs, ys)
-      },
-      method = "Broyden",
-      global = "dbldog",
-      control = list(
-        ftol = 1e-8,
-        xtol = 1e-8,
-        maxit = 200,
-        allowSingular = FALSE
-      )
-    )
-    
-    theta_bc <- as.numeric(result$x)
-    
-    if (any(!is.finite(theta_bc))) {
-      stop("non-finite adjusted-equation estimate")
-    }
-    
-    final_score <- adjusted_score(theta_bc, Xs, ys)
-    
-    if (!(result$termcd %in% c(1, 2))) {
-      stop(
-        paste0(
-          "adjusted equation solver did not converge; termcd = ",
-          result$termcd
-        )
-      )
-    }
-    
-    if (max(abs(final_score)) > 1e-6) {
-      stop(
-        paste0(
-          "adjusted equation residual is too large: ",
-          max(abs(final_score))
-        )
-      )
-    }
-    
-    theta_bc
-  }
-  
-  ############################################################
-  ## Storage
-  ############################################################
-  
-  theta_simple <- matrix(0, m_N, d)
-  theta_bc_bias <- matrix(0, m_N, d)
-  theta_bc_equation <- matrix(0, m_N, d)
+  theta_subsample <- matrix(
+    NA_real_,
+    nrow = m_N,
+    ncol = d,
+    dimnames = list(NULL, coefficient_names)
+  )
   
   bad_draws <- 0
   total_draws <- 0
   
-  ############################################################
-  ## Timing accumulators, in seconds
-  ############################################################
-  
-  time_subsampling_seconds <- 0
-  time_simple_seconds <- 0
-  time_bc_bias_seconds <- 0
-  time_bc_equation_seconds <- 0
   
   ############################################################
-  ## Draw and process subsamples
+  ## Start timing the selected subbagging method
+  ############################################################
+  
+  ## Resetting the seed ensures that separate runs of the
+  ## three methods use the same sequence of subsamples.
+  set.seed(seed_r)
+  
+  time_start <- proc.time()[["elapsed"]]
+  
+  
+  ############################################################
+  ## Draw and process m_N valid subsamples
   ############################################################
   
   for (b in seq_len(m_N)) {
@@ -235,411 +422,157 @@ SubbaggingCore <- function(data, k_N, alpha,
       
       total_draws <- total_draws + 1
       
-      ##########################################################
-      ## Time subsample drawing and extraction
-      ##########################################################
-      
-      time_start <- proc.time()[["elapsed"]]
-      
-      id <- sample(seq_len(N), k_N, replace = FALSE)
-      Xs <- X[id, , drop = FALSE]
-      ys <- y[id]
-      
-      time_subsampling_seconds <- time_subsampling_seconds +
-        (proc.time()[["elapsed"]] - time_start)
-      
-      ##########################################################
-      ## Time simple subsample estimator
-      ##########################################################
-      
-      time_start <- proc.time()[["elapsed"]]
-      
-      theta_result <- try(
-        fit_theta(Xs, ys),
-        silent = TRUE
+      subsample_id <- sample(
+        seq_len(N),
+        size = k_N,
+        replace = FALSE
       )
       
-      time_simple_seconds <- time_simple_seconds +
-        (proc.time()[["elapsed"]] - time_start)
+      Xs <- X[subsample_id, , drop = FALSE]
+      ys <- y[subsample_id]
+      
+      
+      ##########################################################
+      ## Apply the selected estimator to this subsample
+      ##########################################################
+      
+      theta_result <- try({
+        
+        theta_hat <- FitTheta(Xs, ys, model)
+        
+        if (method == "simple") {
+          
+          theta_hat
+          
+        } else if (method == "bc_bias") {
+          
+          B <- Bhat(theta_hat, Xs, ys, model)
+          theta_hat - B / k_N
+          
+        } else {
+          
+          SolveBCEquation(
+            theta_start = theta_hat,
+            Xs = Xs,
+            ys = ys,
+            model = model
+          )
+        }
+        
+      }, silent = TRUE)
+      
+      
+      ##########################################################
+      ## Redraw only when the selected estimator fails
+      ##########################################################
       
       if (inherits(theta_result, "try-error")) {
         bad_draws <- bad_draws + 1
         next
       }
       
-      theta_hat <- theta_result
-      
-      ##########################################################
-      ## Time bias-correction calculation
-      ##########################################################
-      
-      time_start <- proc.time()[["elapsed"]]
-      
-      B_result <- try(
-        Bhat(theta_hat, Xs, ys),
-        silent = TRUE
-      )
-      
-      time_bc_bias_seconds <- time_bc_bias_seconds +
-        (proc.time()[["elapsed"]] - time_start)
-      
-      if (inherits(B_result, "try-error")) {
-        bad_draws <- bad_draws + 1
-        next
-      }
-      
-      theta_bias <- theta_hat - B_result / k_N
-      
-      ##########################################################
-      ## Time adjusted estimating-equation solution
-      ##########################################################
-      
-      time_start <- proc.time()[["elapsed"]]
-      
-      theta_equation_result <- try(
-        solve_bc_equation(
-          theta_start = theta_hat,
-          Xs = Xs,
-          ys = ys
-        ),
-        silent = TRUE
-      )
-      
-      time_bc_equation_seconds <- time_bc_equation_seconds +
-        (proc.time()[["elapsed"]] - time_start)
-      
-      if (inherits(theta_equation_result, "try-error")) {
-        bad_draws <- bad_draws + 1
-        next
-      }
-      
-      theta_simple[b, ] <- theta_hat
-      theta_bc_bias[b, ] <- theta_bias
-      theta_bc_equation[b, ] <- theta_equation_result
-      
+      theta_subsample[b, ] <- theta_result
       valid_draw <- TRUE
     }
   }
   
-  colnames(theta_simple) <- colnames(X)
-  colnames(theta_bc_bias) <- colnames(X)
-  colnames(theta_bc_equation) <- colnames(X)
   
   ############################################################
-  ## Include final averaging time for each estimator
+  ## Average the m_N subsample estimates
   ############################################################
   
-  time_start <- proc.time()[["elapsed"]]
-  estimate_simple <- colMeans(theta_simple)
-  time_simple_seconds <- time_simple_seconds +
-    (proc.time()[["elapsed"]] - time_start)
+  estimate <- colMeans(theta_subsample)
   
-  time_start <- proc.time()[["elapsed"]]
-  estimate_bc_bias <- colMeans(theta_bc_bias)
-  time_bc_bias_seconds <- time_bc_bias_seconds +
-    (proc.time()[["elapsed"]] - time_start)
   
-  time_start <- proc.time()[["elapsed"]]
-  estimate_bc_equation <- colMeans(theta_bc_equation)
-  time_bc_equation_seconds <- time_bc_equation_seconds +
-    (proc.time()[["elapsed"]] - time_start)
+  ############################################################
+  ## End timing
+  ############################################################
   
-  estimate <- rbind(
-    simple = estimate_simple,
-    bc_bias = estimate_bc_bias,
-    bc_equation = estimate_bc_equation
+  time_end <- proc.time()[["elapsed"]]
+  time_total_seconds <- time_end - time_start
+  
+  
+  ############################################################
+  ## Calculate SSE and variance-inflation adjustments
+  ############################################################
+  
+  sse <- CalculateSSE(
+    theta_subsample = theta_subsample,
+    N = N,
+    k_N = k_N
   )
   
+  adjustment_factor <- sqrt(1 + 1 / alpha_N)
+  adjusted_asd <- adjustment_factor * asd
+  adjusted_sse <- adjustment_factor * sse
+  
+  
   ############################################################
-  ## Standard error estimates
+  ## Save this replication
   ############################################################
   
-  se_fun <- function(A) {
-    Omega <- cov(A) * (m_N - 1) / m_N
-    sqrt((1 + 1 / alpha_N) * k_N * diag(Omega) / N)
-  }
-  
-  se <- rbind(
-    simple = se_fun(theta_simple),
-    bc_bias = se_fun(theta_bc_bias),
-    bc_equation = se_fun(theta_bc_equation)
-  )
-  
-  colnames(se) <- colnames(X)
-  
-  list(
+  result <- data.frame(
+    replication = r,
+    seed = seed_r,
     N = N,
     k_N = k_N,
     m_N = m_N,
     alpha = alpha,
-    estimate = estimate,
-    se = se,
+    alpha_N = alpha_N,
+    model = model,
+    method = method,
     bad_draws = bad_draws,
     total_draws = total_draws,
-    timing = list(
-      subsampling_seconds = time_subsampling_seconds,
-      simple_seconds = time_simple_seconds,
-      bc_bias_seconds = time_bc_bias_seconds,
-      bc_equation_seconds = time_bc_equation_seconds
-    ),
-    subsample_estimates = list(
-      simple = theta_simple,
-      bc_bias = theta_bc_bias,
-      bc_equation = theta_bc_equation
-    )
+    time_total_seconds = time_total_seconds,
+    check.names = FALSE
+  )
+  
+  for (j in seq_along(coefficient_names)) {
+    result[[paste0("estimate_", coefficient_names[j])]] <- estimate[j]
+  }
+  
+  for (j in seq_along(coefficient_names)) {
+    result[[paste0("asd_", coefficient_names[j])]] <- asd[j]
+  }
+  
+  for (j in seq_along(coefficient_names)) {
+    result[[paste0("adjusted_asd_", coefficient_names[j])]] <- adjusted_asd[j]
+  }
+  
+  for (j in seq_along(coefficient_names)) {
+    result[[paste0("sse_", coefficient_names[j])]] <- sse[j]
+  }
+  
+  for (j in seq_along(coefficient_names)) {
+    result[[paste0("adjusted_sse_", coefficient_names[j])]] <- adjusted_sse[j]
+  }
+  
+  write.table(
+    result,
+    file = file_path,
+    sep = ",",
+    row.names = FALSE,
+    col.names = (r == 1),
+    append = (r > 1),
+    quote = FALSE
+  )
+  
+  cat(
+    "Finished replication", r,
+    "| seed:", seed_r,
+    "| model:", model,
+    "| method:", method,
+    "| bad draws:", bad_draws,
+    "| total draws:", total_draws,
+    "| time:", round(time_total_seconds, 4),
+    "seconds\n"
   )
 }
 
 
 ############################################################
-## 2. Generate simulated data
+## 6. Completion message
 ############################################################
 
-GenerateSimulatedData <- function(N = 1000,
-                                  theta = c(0, 1),
-                                  model = c("linear", "logistic"),
-                                  sigma = 1,
-                                  seed = 1) {
-  
-  model <- match.arg(model)
-  set.seed(seed)
-  
-  p <- length(theta) - 1
-  
-  X <- matrix(rnorm(N * p), nrow = N, ncol = p)
-  colnames(X) <- paste0("x", seq_len(p))
-  
-  eta <- as.numeric(cbind(1, X) %*% theta)
-  
-  if (model == "linear") {
-    y <- eta + rnorm(N, sd = sigma)
-  }
-  
-  if (model == "logistic") {
-    prob <- plogis(eta)
-    y <- rbinom(N, size = 1, prob = prob)
-  }
-  
-  data <- data.frame(y = y, X)
-  attr(data, "theta_true") <- theta
-  
-  data
-}
-
-
-############################################################
-## 3. Run simulation
-############################################################
-
-RunSubbaggingSimulation <- function(R = 100,
-                                    seed_start = 1,
-                                    N = 1000,
-                                    theta = c(0, 1),
-                                    k_N = 100,
-                                    alpha = 1,
-                                    model = c("linear", "logistic"),
-                                    sigma = 1,
-                                    output_dir = ".") {
-  
-  model <- match.arg(model)
-  
-  if (!dir.exists(output_dir)) {
-    dir.create(output_dir, recursive = TRUE)
-  }
-  
-  m_N <- floor(alpha * N / k_N)
-  methods <- c("simple", "bc_bias", "bc_equation")
-  
-  results <- list()
-  
-  for (method in methods) {
-    results[[method]] <- NULL
-  }
-  
-  ############################################################
-  ## Helper: avoid scientific notation in file names
-  ############################################################
-  
-  plain_number <- function(x) {
-    x <- format(x, scientific = FALSE, trim = TRUE)
-    x <- gsub("\\.", "p", x)
-    x
-  }
-  
-  ############################################################
-  ## Run replications
-  ############################################################
-  
-  for (r in seq_len(R)) {
-    
-    seed_r <- seed_start + r - 1
-    
-    data_r <- GenerateSimulatedData(
-      N = N,
-      theta = theta,
-      model = model,
-      sigma = sigma,
-      seed = seed_r
-    )
-    
-    fit_r <- SubbaggingCore(
-      data = data_r,
-      k_N = k_N,
-      alpha = alpha,
-      model = model,
-      seed = seed_r
-    )
-    
-    coef_names <- colnames(fit_r$estimate)
-    
-    for (method in methods) {
-      
-      estimate_r <- fit_r$estimate[method, ]
-      se_r <- fit_r$se[method, ]
-      
-      row_r <- data.frame(
-        replication = r,
-        seed = seed_r,
-        N = N,
-        k_N = k_N,
-        m_N = fit_r$m_N,
-        alpha = alpha,
-        model = model,
-        method = method,
-        bad_draws = fit_r$bad_draws,
-        total_draws = fit_r$total_draws,
-        time_subsampling_seconds = fit_r$timing$subsampling_seconds,
-        time_simple_seconds = fit_r$timing$simple_seconds,
-        time_bc_bias_seconds = fit_r$timing$bc_bias_seconds,
-        time_bc_equation_seconds = fit_r$timing$bc_equation_seconds
-      )
-      
-      for (j in seq_along(coef_names)) {
-        row_r[[paste0("estimate_", coef_names[j])]] <- estimate_r[j]
-      }
-      
-      for (j in seq_along(coef_names)) {
-        row_r[[paste0("se_", coef_names[j])]] <- se_r[j]
-      }
-      
-      results[[method]] <- rbind(results[[method]], row_r)
-    }
-    
-    cat(
-      "Finished replication", r,
-      "with seed", seed_r,
-      "| bad draws:", fit_r$bad_draws,
-      "| total draws:", fit_r$total_draws,
-      "| subsampling:", round(fit_r$timing$subsampling_seconds, 4),
-      "| simple:", round(fit_r$timing$simple_seconds, 4),
-      "| bc bias:", round(fit_r$timing$bc_bias_seconds, 4),
-      "| bc equation:", round(fit_r$timing$bc_equation_seconds, 4),
-      "seconds\n"
-    )
-  }
-  
-  ############################################################
-  ## Save CSV files
-  ############################################################
-  
-  N_name <- plain_number(N)
-  k_N_name <- plain_number(k_N)
-  m_N_name <- plain_number(m_N)
-  alpha_name <- plain_number(alpha)
-  
-  file_paths <- c()
-  
-  for (method in methods) {
-    
-    file_name <- paste0(
-      "simulation_",
-      "model=", model,
-      "_N=", N_name,
-      "_k_N=", k_N_name,
-      "_m_N=", m_N_name,
-      "_alpha=", alpha_name,
-      "_method=", method,
-      ".csv"
-    )
-    
-    file_path <- file.path(output_dir, file_name)
-    
-    write.csv(
-      results[[method]],
-      file_path,
-      row.names = FALSE
-    )
-    
-    file_paths[method] <- file_path
-  }
-  
-  list(
-    settings = list(
-      R = R,
-      seed_start = seed_start,
-      N = N,
-      theta = theta,
-      k_N = k_N,
-      m_N = m_N,
-      alpha = alpha,
-      model = model,
-      sigma = sigma
-    ),
-    results = results,
-    file_paths = file_paths
-  )
-}
-
-
-############################################################
-## 4. Linear regression implementation
-############################################################
-
-R <- 100
-seed_start <- 1
-theta <- c(1, 2)
-model <- "linear"
-sigma <- 1
-output_dir <- "./Subbagging new"
-N <- 20000
-k_N <- floor(N^(1 / 2 + 1 / 4))
-alpha <- 1
-
-sim_linear <- RunSubbaggingSimulation(
-  R = R,
-  seed_start = seed_start,
-  N = N,
-  theta = theta,
-  k_N = k_N,
-  alpha = alpha,
-  model = model,
-  sigma = sigma,
-  output_dir = output_dir
-)
-
-
-############################################################
-## 5. Logistic regression implementation
-############################################################
-
-R <- 100
-seed_start <- 1
-theta <- c(1, 2)
-model <- "logistic"
-sigma <- 1
-output_dir <- "./Subbagging new"
-N <- 20000
-k_N <- floor(N^(1 / 2 + 1 / 4))
-alpha <- 1
-
-sim_logistic <- RunSubbaggingSimulation(
-  R = R,
-  seed_start = seed_start,
-  N = N,
-  theta = theta,
-  k_N = k_N,
-  alpha = alpha,
-  model = model,
-  sigma = sigma,
-  output_dir = output_dir
-)
+cat("\nSimulation completed.\n")
+cat("Output file:", file_path, "\n")
