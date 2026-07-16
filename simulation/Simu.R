@@ -13,7 +13,7 @@ model <- "linear"
 
 ## Choose one estimator:
 ## "simple", "bc_bias", or "bc_equation"
-method <- "simple"
+method <- "bc_equation"
 
 ## Number of simulation replications
 R <- 100
@@ -341,12 +341,17 @@ for (r in seq_len(R)) {
   ########################################################---
   # 4.2 Full-data ASD evaluated at the true parameter ----
   ########################################################---
+  time_asd_start <- proc.time()[["elapsed"]]
+  
   asd <- CalculateASD(
     X = X,
     y = y,
     true_theta = true_theta,
     model = model
   )
+  
+  time_asd_end <- proc.time()[["elapsed"]]
+  time_asd_seconds <- time_asd_end - time_asd_start
   
   ########################################################---
   # 4.3 Storage for the selected subbagging estimator ----
@@ -365,13 +370,14 @@ for (r in seq_len(R)) {
   total_draws <- 0
   
   ########################################################---
-  # 4.4 Start timing the selected subbagging method ----
+  # 4.4 Initialise cumulative timing ----
   ########################################################---
   ## Resetting the seed ensures that separate runs of the
   ## three methods use the same sequence of subsamples.
   set.seed(seed_r)
   
-  time_start <- proc.time()[["elapsed"]]
+  time_subsampling_seconds <- 0
+  time_estimation_seconds <- 0
   
   ########################################################---
   # 4.5 Draw and process m_N valid subsamples ----
@@ -384,6 +390,8 @@ for (r in seq_len(R)) {
       
       total_draws <- total_draws + 1
       
+      subsampling_time_start <- proc.time()[["elapsed"]]
+      
       subsample_id <- sample(
         seq_len(N),
         size = k_N,
@@ -393,9 +401,15 @@ for (r in seq_len(R)) {
       Xs <- X[subsample_id, , drop = FALSE]
       ys <- y[subsample_id]
       
+      subsampling_time_end <- proc.time()[["elapsed"]]
+      time_subsampling_seconds <- time_subsampling_seconds +
+        (subsampling_time_end - subsampling_time_start)
+      
       #########################################################---
       ## 4.5.1 Apply the selected estimator to this subsample ----
       #########################################################---
+      estimation_time_start <- proc.time()[["elapsed"]]
+      
       theta_result <- try({
         
         theta_hat <- FitTheta(Xs, ys, model)
@@ -421,6 +435,10 @@ for (r in seq_len(R)) {
         
       }, silent = TRUE)
       
+      estimation_time_end <- proc.time()[["elapsed"]]
+      time_estimation_seconds <- time_estimation_seconds +
+        (estimation_time_end - estimation_time_start)
+      
       #########################################################---
       ## 4.5.2 Redraw only when the selected estimator fails ----
       #########################################################---
@@ -437,22 +455,27 @@ for (r in seq_len(R)) {
   #########################################################---
   ## 4.6 Average the m_N subsample estimates ----
   #########################################################---
+  estimation_time_start <- proc.time()[["elapsed"]]
+  
   estimate <- colMeans(theta_subsample)
   
-  #########################################################---
-  ## 4.7 End timing ----
-  #########################################################---
-  time_end <- proc.time()[["elapsed"]]
-  time_total_seconds <- time_end - time_start
+  estimation_time_end <- proc.time()[["elapsed"]]
+  time_estimation_seconds <- time_estimation_seconds +
+    (estimation_time_end - estimation_time_start)
   
   #########################################################---
   ## 4.8 Calculate SSE and variance-inflation adjustments ----
   #########################################################---
+  time_sse_start <- proc.time()[["elapsed"]]
+  
   sse <- CalculateSSE(
     theta_subsample = theta_subsample,
     N = N,
     k_N = k_N
   )
+  
+  time_sse_end <- proc.time()[["elapsed"]]
+  time_sse_seconds <- time_sse_end - time_sse_start
   
   adjustment_factor <- sqrt(1 + 1 / alpha_N)
   adjusted_asd <- adjustment_factor * asd
@@ -473,7 +496,10 @@ for (r in seq_len(R)) {
     method = method,
     bad_draws = bad_draws,
     total_draws = total_draws,
-    time_total_seconds = time_total_seconds,
+    time_subsampling_seconds = time_subsampling_seconds,
+    time_estimation_seconds = time_estimation_seconds,
+    time_sse_seconds = time_sse_seconds,
+    time_asd_seconds = time_asd_seconds,
     check.names = FALSE
   )
   
