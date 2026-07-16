@@ -242,8 +242,10 @@ SummariseSimulationFolder <- function(
     alpha_N_value <- GetSetting("alpha_N")
     
     mean_bad_draws <- MeanColumn("bad_draws")
-    mean_total_draws <- MeanColumn("total_draws")
-    mean_time_total_seconds <- MeanColumn("time_total_seconds")
+    mean_time_subsampling_seconds <- MeanColumn("time_subsampling_seconds")
+    mean_time_estimation_seconds <- MeanColumn("time_estimation_seconds")
+    mean_time_sse_seconds <- MeanColumn("time_sse_seconds")
+    mean_time_asd_seconds <- MeanColumn("time_asd_seconds")
     
     seed_range <- SeedRange()
     
@@ -379,17 +381,19 @@ SummariseSimulationFolder <- function(
         BIAS = bias,
         SD = sd_value,
         RMSE = rmse,
-        ASE_asd = asd_summary$ASE,
+        ASD = asd_summary$ASE,
         CP_asd = asd_summary$CP,
-        ASE_adjusted_asd = adjusted_asd_summary$ASE,
+        adjusted_ASD = adjusted_asd_summary$ASE,
         CP_adjusted_asd = adjusted_asd_summary$CP,
-        ASE_sse = sse_summary$ASE,
+        SSE = sse_summary$ASE,
         CP_sse = sse_summary$CP,
-        ASE_adjusted_sse = adjusted_sse_summary$ASE,
+        adjusted_SSE = adjusted_sse_summary$ASE,
         CP_adjusted_sse = adjusted_sse_summary$CP,
         mean_bad_draws = mean_bad_draws,
-        mean_total_draws = mean_total_draws,
-        mean_time_total_seconds = mean_time_total_seconds,
+        mean_time_subsampling_seconds = mean_time_subsampling_seconds,
+        mean_time_estimation_seconds = mean_time_estimation_seconds,
+        mean_time_sse_seconds = mean_time_sse_seconds,
+        mean_time_asd_seconds = mean_time_asd_seconds,
         source_file = basename(file),
         check.names = FALSE
       )
