@@ -109,7 +109,7 @@ Moments <- function(theta, Xs, ys, model) {
   psi <- Xs * as.numeric(ys - mu)
   
   ## Sample derivative matrix V_hat(theta).
-  V <- -crossprod(Xs, Xs * w) / n
+  V <- -(t(Xs) %*% (Xs * w)) / n
   
   list(
     psi = psi,
@@ -145,14 +145,14 @@ Bhat <- function(theta, Xs, ys, model) {
   V_part <- as.numeric(V %*% colMeans(A))
   term1 <- -(D_part - V_part)
   
-  Q <- crossprod(A) / n
+  Q <- (t(A) %*% A) / n
   term2 <- rep(0, d)
   
   if (model == "logistic") {
     for (j in seq_len(d)) {
-      H_j <- -crossprod(
-        Xs,
-        Xs * (M$h * Xs[, j])
+      H_j <- -(
+        t(Xs) %*%
+          (Xs * (M$h * Xs[, j]))
       ) / n
       
       term2[j] <- 0.5 * sum(H_j * Q)
@@ -195,7 +195,7 @@ AdjustedScore <- function(theta, Xs, ys, model) {
 #########################################################---
 SolveBCEquation <- function(theta_start, Xs, ys, model) {
   
-  solution <- nleqslv(
+  solution <- nleqslv::nleqslv(
     x = theta_start,
     fn = function(theta) {
       AdjustedScore(theta, Xs, ys, model)
@@ -241,7 +241,7 @@ CalculateASD <- function(X, y, true_theta, model) {
   M <- Moments(true_theta, X, y, model)
   
   V_hat <- M$V
-  Sigma_hat <- crossprod(M$psi) / n
+  Sigma_hat <- (t(M$psi) %*% M$psi) / n
   
   if (!is.finite(rcond(V_hat)) || rcond(V_hat) < 1e-12) {
     stop("The full-data derivative matrix is singular.")
@@ -263,15 +263,18 @@ CalculateSSE <- function(theta_subsample, N, k_N) {
   ## Omega_hat uses the denominator m_N, matching the paper's
   ## subbagging variance estimator.
   theta_average <- colMeans(theta_subsample)
-  centered_theta <- sweep(
-    theta_subsample,
-    MARGIN = 2,
-    STATS = theta_average,
-    FUN = "-"
+  m_N <- nrow(theta_subsample)
+  
+  theta_average_matrix <- matrix(
+    theta_average,
+    nrow = m_N,
+    ncol = ncol(theta_subsample),
+    byrow = TRUE
   )
   
-  m_N <- nrow(theta_subsample)
-  Omega_hat <- crossprod(centered_theta) / m_N
+  centered_theta <- theta_subsample - theta_average_matrix
+  
+  Omega_hat <- (t(centered_theta) %*% centered_theta) / m_N
   
   sqrt(
     k_N * diag(Omega_hat) / N
