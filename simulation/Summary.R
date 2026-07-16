@@ -1,57 +1,125 @@
 ############################################################
-## Summary simulation CSV files in one folder
+## Summarise simulation CSV files in one folder
 ############################################################
 
-SummariseSimulationFolder <- function(folder = ".",
-                                      theta = c(0, 1),
-                                      output_file = "all_simulation_results_summary.csv",
-                                      z_value = 1.96) {
+SummariseSimulationFolder <- function(
+    folder = ".",
+    theta = c(1, 2),
+    output_file = "all_simulation_results_summary.csv",
+    z_value = 1.96
+) {
   
   ############################################################
-  ## Find simulation CSV files
+  ## 1. Find simulation CSV files ----
   ############################################################
+  
   files <- list.files(
     path = folder,
     pattern = "^simulation_.*\\.csv$",
     full.names = TRUE
   )
   
-  files <- files[!grepl("summary", basename(files), ignore.case = TRUE)]
+  files <- files[
+    !grepl(
+      pattern = "summary",
+      x = basename(files),
+      ignore.case = TRUE
+    )
+  ]
   
   if (length(files) == 0) {
-    stop("No simulation CSV files found in this folder.")
+    stop("No simulation CSV files were found in the selected folder.")
   }
   
+  
   ############################################################
-  ## Summarise one file
+  ## 2. Summarise one simulation file ----
   ############################################################
-  summarise_one_file <- function(file) {
+  
+  SummariseOneFile <- function(file) {
     
-    df <- read.csv(file, check.names = FALSE)
+    df <- read.csv(
+      file = file,
+      check.names = FALSE
+    )
     
-    estimate_cols <- grep("^estimate_", names(df), value = TRUE)
+    estimate_cols <- grep(
+      pattern = "^estimate_",
+      x = names(df),
+      value = TRUE
+    )
     
-    if (length(estimate_cols) != length(theta)) {
+    if (length(estimate_cols) == 0) {
       stop(
         paste0(
-          "Number of estimate columns does not match length(theta) in file: ",
-          basename(file),
-          "\nNumber of estimate columns = ", length(estimate_cols),
-          "\nlength(theta) = ", length(theta)
+          "No estimate columns were found in file: ",
+          basename(file)
         )
       )
     }
     
+    if (length(estimate_cols) != length(theta)) {
+      stop(
+        paste0(
+          "The number of estimate columns does not match ",
+          "the length of theta in file: ",
+          basename(file),
+          "\nNumber of estimate columns = ",
+          length(estimate_cols),
+          "\nLength of theta = ",
+          length(theta)
+        )
+      )
+    }
+    
+    
     ############################################################
-    ## Helper: safely calculate the mean of a timing column
+    ## 2.1 Helper: extract one constant setting ----
     ############################################################
-    mean_time <- function(column_name) {
+    
+    GetSetting <- function(column_name) {
+      
+      if (!column_name %in% names(df)) {
+        return(NA)
+      }
+      
+      values <- unique(df[[column_name]])
+      values <- values[!is.na(values)]
+      
+      if (length(values) == 0) {
+        return(NA)
+      }
+      
+      if (length(values) > 1) {
+        warning(
+          paste0(
+            "More than one value of ",
+            column_name,
+            " was found in file: ",
+            basename(file),
+            ". The first value will be used."
+          )
+        )
+      }
+      
+      values[1]
+    }
+    
+    
+    ############################################################
+    ## 2.2 Helper: safely calculate a column mean ----
+    ############################################################
+    
+    MeanColumn <- function(column_name) {
       
       if (!column_name %in% names(df)) {
         return(NA_real_)
       }
       
-      values <- suppressWarnings(as.numeric(df[[column_name]]))
+      values <- suppressWarnings(
+        as.numeric(df[[column_name]])
+      )
+      
       values <- values[is.finite(values)]
       
       if (length(values) == 0) {
@@ -61,183 +129,279 @@ SummariseSimulationFolder <- function(folder = ".",
       mean(values)
     }
     
-    ############################################################
-    ## Timing summaries across replications
-    ############################################################
-    mean_time_subsampling_seconds <- mean_time(
-      "time_subsampling_seconds"
-    )
-    
-    mean_time_simple_seconds <- mean_time(
-      "time_simple_seconds"
-    )
-    
-    mean_time_bc_bias_seconds <- mean_time(
-      "time_bc_bias_seconds"
-    )
-    
-    mean_time_bc_equation_seconds <- mean_time(
-      "time_bc_equation_seconds"
-    )
     
     ############################################################
-    ## Mean total time for the method represented by this file
-    ##
-    ## simple:
-    ##   subsampling + simple
-    ##
-    ## bc_bias:
-    ##   subsampling + simple + bias correction
-    ##
-    ## bc_equation:
-    ##   subsampling + simple + adjusted-equation solution
+    ## 2.3 Helper: safely calculate seed minimum and maximum ----
     ############################################################
-    method_name <- as.character(unique(df$method)[1])
     
-    if (method_name == "simple") {
+    SeedRange <- function() {
       
-      required_times <- c(
-        mean_time_subsampling_seconds,
-        mean_time_simple_seconds
+      if (!"seed" %in% names(df)) {
+        return(
+          list(
+            minimum = NA_real_,
+            maximum = NA_real_
+          )
+        )
+      }
+      
+      seed_values <- suppressWarnings(
+        as.numeric(df$seed)
       )
       
-    } else if (method_name == "bc_bias") {
+      seed_values <- seed_values[is.finite(seed_values)]
       
-      required_times <- c(
-        mean_time_subsampling_seconds,
-        mean_time_simple_seconds,
-        mean_time_bc_bias_seconds
+      if (length(seed_values) == 0) {
+        return(
+          list(
+            minimum = NA_real_,
+            maximum = NA_real_
+          )
+        )
+      }
+      
+      list(
+        minimum = min(seed_values),
+        maximum = max(seed_values)
       )
-      
-    } else if (method_name == "bc_equation") {
-      
-      required_times <- c(
-        mean_time_subsampling_seconds,
-        mean_time_simple_seconds,
-        mean_time_bc_equation_seconds
-      )
-      
-    } else {
-      
-      required_times <- numeric(0)
     }
     
-    if (length(required_times) > 0 &&
-        all(is.finite(required_times))) {
-      mean_method_total_seconds <- sum(required_times)
-    } else {
-      mean_method_total_seconds <- NA_real_
+    
+    ############################################################
+    ## 2.4 Helper: calculate ASE and coverage probability ----
+    ############################################################
+    
+    SummariseStandardError <- function(
+    estimate_column,
+    standard_error_column,
+    true_value
+    ) {
+      
+      if (!standard_error_column %in% names(df)) {
+        return(
+          list(
+            ASE = NA_real_,
+            CP = NA_real_,
+            n_valid = 0
+          )
+        )
+      }
+      
+      estimates <- suppressWarnings(
+        as.numeric(df[[estimate_column]])
+      )
+      
+      standard_errors <- suppressWarnings(
+        as.numeric(df[[standard_error_column]])
+      )
+      
+      valid <- is.finite(estimates) &
+        is.finite(standard_errors) &
+        standard_errors >= 0
+      
+      if (!any(valid)) {
+        return(
+          list(
+            ASE = NA_real_,
+            CP = NA_real_,
+            n_valid = 0
+          )
+        )
+      }
+      
+      estimates <- estimates[valid]
+      standard_errors <- standard_errors[valid]
+      
+      lower_bound <- estimates - z_value * standard_errors
+      upper_bound <- estimates + z_value * standard_errors
+      
+      coverage <- (
+        lower_bound <= true_value &
+          upper_bound >= true_value
+      )
+      
+      list(
+        ASE = mean(standard_errors),
+        CP = mean(coverage),
+        n_valid = length(estimates)
+      )
     }
     
-    rows <- list()
+    
+    ############################################################
+    ## 2.5 Simulation settings and timing summaries ----
+    ############################################################
+    
+    model_name <- GetSetting("model")
+    method_name <- GetSetting("method")
+    
+    N_value <- GetSetting("N")
+    k_N_value <- GetSetting("k_N")
+    m_N_value <- GetSetting("m_N")
+    alpha_value <- GetSetting("alpha")
+    alpha_N_value <- GetSetting("alpha_N")
+    
+    mean_bad_draws <- MeanColumn("bad_draws")
+    mean_total_draws <- MeanColumn("total_draws")
+    mean_time_total_seconds <- MeanColumn("time_total_seconds")
+    
+    seed_range <- SeedRange()
+    
+    
+    ############################################################
+    ## 2.6 Summarise each parameter ----
+    ############################################################
+    
+    rows <- vector(
+      mode = "list",
+      length = length(estimate_cols)
+    )
     
     for (j in seq_along(estimate_cols)) {
       
       estimate_col <- estimate_cols[j]
-      se_col <- paste0("se_", sub("^estimate_", "", estimate_col))
+      
+      parameter_name <- sub(
+        pattern = "^estimate_",
+        replacement = "",
+        x = estimate_col
+      )
       
       true_value <- theta[j]
       
-      estimates_all <- df[[estimate_col]]
-      estimates <- estimates_all[!is.na(estimates_all)]
+      estimates <- suppressWarnings(
+        as.numeric(df[[estimate_col]])
+      )
+      
+      estimates <- estimates[is.finite(estimates)]
       
       if (length(estimates) == 0) {
         next
       }
       
+      
+      ############################################################
+      ## Point-estimation performance ----
+      ############################################################
+      
       mean_estimate <- mean(estimates)
       bias <- mean_estimate - true_value
-      sd_value <- sd(estimates)
-      rmse <- sqrt(mean((estimates - true_value)^2))
       
-      if (se_col %in% names(df)) {
-        
-        se_values <- df[[se_col]]
-        ase <- mean(se_values, na.rm = TRUE)
-        
-        lower <- df[[estimate_col]] - z_value * df[[se_col]]
-        upper <- df[[estimate_col]] + z_value * df[[se_col]]
-        
-        valid <- !is.na(lower) & !is.na(upper)
-        
-        if (sum(valid) > 0) {
-          cp <- mean(
-            lower[valid] <= true_value &
-              upper[valid] >= true_value
-          )
-        } else {
-          cp <- NA
-        }
-        
+      if (length(estimates) >= 2) {
+        sd_value <- sd(estimates)
       } else {
-        ase <- NA
-        cp <- NA
+        sd_value <- NA_real_
       }
       
-      ############################################################
-      ## Bad draw summaries
-      ############################################################
-      if ("bad_draws" %in% names(df)) {
-        total_bad_draws <- sum(df$bad_draws, na.rm = TRUE)
-        mean_bad_draws <- mean(df$bad_draws, na.rm = TRUE)
-      } else {
-        total_bad_draws <- NA
-        mean_bad_draws <- NA
-      }
+      rmse <- sqrt(
+        mean(
+          (estimates - true_value)^2
+        )
+      )
       
-      if ("total_draws" %in% names(df)) {
-        total_draws_sum <- sum(df$total_draws, na.rm = TRUE)
-        mean_total_draws <- mean(df$total_draws, na.rm = TRUE)
-      } else {
-        total_draws_sum <- NA
-        mean_total_draws <- NA
-      }
-      
-      if (!is.na(total_bad_draws) &&
-          !is.na(total_draws_sum) &&
-          total_draws_sum > 0) {
-        bad_draw_rate <- total_bad_draws / total_draws_sum
-      } else {
-        bad_draw_rate <- NA
-      }
       
       ############################################################
-      ## Create one summary row
+      ## ASD-based inference ----
       ############################################################
-      row <- data.frame(
-        model = unique(df$model)[1],
-        N = unique(df$N)[1],
-        k_N = unique(df$k_N)[1],
-        m_N = unique(df$m_N)[1],
-        alpha = unique(df$alpha)[1],
+      
+      asd_summary <- SummariseStandardError(
+        estimate_column = estimate_col,
+        standard_error_column = paste0(
+          "asd_",
+          parameter_name
+        ),
+        true_value = true_value
+      )
+      
+      
+      ############################################################
+      ## Adjusted-ASD-based inference ----
+      ############################################################
+      
+      adjusted_asd_summary <- SummariseStandardError(
+        estimate_column = estimate_col,
+        standard_error_column = paste0(
+          "adjusted_asd_",
+          parameter_name
+        ),
+        true_value = true_value
+      )
+      
+      
+      ############################################################
+      ## SSE-based inference ----
+      ############################################################
+      
+      sse_summary <- SummariseStandardError(
+        estimate_column = estimate_col,
+        standard_error_column = paste0(
+          "sse_",
+          parameter_name
+        ),
+        true_value = true_value
+      )
+      
+      
+      ############################################################
+      ## Adjusted-SSE-based inference ----
+      ############################################################
+      
+      adjusted_sse_summary <- SummariseStandardError(
+        estimate_column = estimate_col,
+        standard_error_column = paste0(
+          "adjusted_sse_",
+          parameter_name
+        ),
+        true_value = true_value
+      )
+      
+      
+      ############################################################
+      ## Create one summary row ----
+      ############################################################
+      
+      rows[[j]] <- data.frame(
+        model = model_name,
+        N = N_value,
+        k_N = k_N_value,
+        m_N = m_N_value,
+        alpha = alpha_value,
+        alpha_N = alpha_N_value,
         method = method_name,
         parameter_index = j,
+        parameter = parameter_name,
         true_value = true_value,
         n_rep = nrow(df),
-        seed_min = min(df$seed, na.rm = TRUE),
-        seed_max = max(df$seed, na.rm = TRUE),
+        n_valid_estimates = length(estimates),
+        seed_min = seed_range$minimum,
+        seed_max = seed_range$maximum,
         mean_estimate = mean_estimate,
         BIAS = bias,
         SD = sd_value,
-        ASE = ase,
         RMSE = rmse,
-        CP = cp,
+        ASE_asd = asd_summary$ASE,
+        CP_asd = asd_summary$CP,
+        ASE_adjusted_asd = adjusted_asd_summary$ASE,
+        CP_adjusted_asd = adjusted_asd_summary$CP,
+        ASE_sse = sse_summary$ASE,
+        CP_sse = sse_summary$CP,
+        ASE_adjusted_sse = adjusted_sse_summary$ASE,
+        CP_adjusted_sse = adjusted_sse_summary$CP,
         mean_bad_draws = mean_bad_draws,
         mean_total_draws = mean_total_draws,
-        mean_time_subsampling_seconds =
-          mean_time_subsampling_seconds,
-        mean_time_simple_seconds =
-          mean_time_simple_seconds,
-        mean_time_bc_bias_seconds =
-          mean_time_bc_bias_seconds,
-        mean_time_bc_equation_seconds =
-          mean_time_bc_equation_seconds,
+        mean_time_total_seconds = mean_time_total_seconds,
         source_file = basename(file),
         check.names = FALSE
       )
-      
-      rows[[length(rows) + 1]] <- row
     }
+    
+    rows <- rows[
+      !vapply(
+        rows,
+        is.null,
+        logical(1)
+      )
+    ]
     
     if (length(rows) == 0) {
       return(NULL)
@@ -246,46 +410,89 @@ SummariseSimulationFolder <- function(folder = ".",
     do.call(rbind, rows)
   }
   
+  
   ############################################################
-  ## Apply to all files
+  ## 3. Apply the summary function to every file ----
   ############################################################
-  all_rows <- list()
+  
+  all_rows <- vector(
+    mode = "list",
+    length = length(files)
+  )
   
   for (i in seq_along(files)) {
-    cat("Processing:", basename(files[i]), "\n")
-    all_rows[[i]] <- summarise_one_file(files[i])
+    
+    cat(
+      "Processing",
+      i,
+      "out of",
+      length(files),
+      ":",
+      basename(files[i]),
+      "\n"
+    )
+    
+    all_rows[[i]] <- SummariseOneFile(files[i])
   }
   
-  all_rows <- all_rows[!vapply(all_rows, is.null, logical(1))]
+  all_rows <- all_rows[
+    !vapply(
+      all_rows,
+      is.null,
+      logical(1)
+    )
+  ]
   
   if (length(all_rows) == 0) {
     stop("No valid simulation results could be summarised.")
   }
   
-  summary_df <- do.call(rbind, all_rows)
+  summary_df <- do.call(
+    rbind,
+    all_rows
+  )
+  
   
   ############################################################
-  ## Sort output
+  ## 4. Sort the summary table ----
   ############################################################
-  summary_df <- summary_df[order(
-    summary_df$model,
-    summary_df$N,
-    summary_df$alpha,
-    summary_df$k_N,
-    summary_df$m_N,
-    summary_df$method,
-    summary_df$parameter_index
-  ), ]
+  
+  summary_df <- summary_df[
+    order(
+      summary_df$model,
+      summary_df$N,
+      summary_df$alpha,
+      summary_df$k_N,
+      summary_df$m_N,
+      summary_df$method,
+      summary_df$parameter_index
+    ),
+  ]
   
   rownames(summary_df) <- NULL
   
-  ############################################################
-  ## Save output
-  ############################################################
-  output_path <- file.path(folder, output_file)
-  write.csv(summary_df, output_path, row.names = FALSE)
   
-  cat("\nDONE.\n")
+  ############################################################
+  ## 5. Save the summary CSV file ----
+  ############################################################
+  
+  output_path <- file.path(
+    folder,
+    output_file
+  )
+  
+  write.csv(
+    summary_df,
+    file = output_path,
+    row.names = FALSE
+  )
+  
+  
+  ############################################################
+  ## 6. Completion message ----
+  ############################################################
+  
+  cat("\nSummary completed.\n")
   cat("Files processed:", length(files), "\n")
   cat("Summary rows:", nrow(summary_df), "\n")
   cat("Output saved to:", output_path, "\n")
@@ -295,13 +502,14 @@ SummariseSimulationFolder <- function(folder = ".",
 
 
 ############################################################
-## Implementation
+## Implementation ----
 ############################################################
 
 summary_df <- SummariseSimulationFolder(
   folder = "./Subbagging new",
   theta = c(1, 2),
-  output_file = "all_simulation_results_summary.csv"
+  output_file = "all_simulation_results_summary.csv",
+  z_value = 1.96
 )
 
 summary_df
