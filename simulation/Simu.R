@@ -9,11 +9,11 @@ if (!requireNamespace("nleqslv", quietly = TRUE)) {
 # 1. Simulation settings ----
 #########################################################---
 ## Choose one model: "linear" or "logistic"
-model <- "linear"
+model <- "logistic"
 
 ## Choose one estimator:
 ## "simple", "bc_bias", or "bc_equation"
-method <- "bc_equation"
+method <- "simple"
 
 ## Number of simulation replications
 R <- 100
@@ -47,7 +47,7 @@ method <- match.arg(method, c("simple", "bc_bias", "bc_equation"))
 
 m_N <- floor(alpha * N / k_N)
 
-## Effective value after applying floor() to m_N.
+## The actual Alpha after applying floor() to m_N.
 alpha_N <- k_N * m_N / N
 
 if (!dir.exists(output_dir)) {
