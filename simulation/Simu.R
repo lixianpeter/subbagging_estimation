@@ -13,7 +13,7 @@ model <- "linear"
 
 ## Choose one estimator:
 ## "simple", "bc_bias", or "bc_equation"
-method <- "bc_equation"
+method <- "simple"
 
 ## Number of simulation replications
 R <- 100
