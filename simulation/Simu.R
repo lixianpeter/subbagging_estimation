@@ -40,11 +40,8 @@ alpha <- 1
 ## Output folder
 output_dir <- "./Subbagging new"
 
-#########################################################---
-# 2. Derived simulation settings ----
-#########################################################---
-## Prevent a spelling error from silently running the wrong
-## model or estimation method.
+
+## model and estimation method.
 model <- match.arg(model, c("linear", "logistic"))
 method <- match.arg(method, c("simple", "bc_bias", "bc_equation"))
 
@@ -58,8 +55,8 @@ if (!dir.exists(output_dir)) {
 }
 
 #########################################################---
-# 3. Functions used in the simulation ----
-## 3.1 Fit the ordinary estimator on one data set ----
+# 2. Functions used in the simulation ----
+## 2.1 Fit the ordinary estimator on one data set ----
 #########################################################---
 
 
@@ -91,7 +88,7 @@ FitTheta <- function(Xs, ys, model) {
 }
 
 #########################################################---
-## 3.2 Compute the estimating functions and derivative matrix ----
+## 2.2 Compute the estimating functions and derivative matrix ----
 #########################################################---
 Moments <- function(theta, Xs, ys, model) {
   
@@ -123,7 +120,7 @@ Moments <- function(theta, Xs, ys, model) {
 }
 
 #########################################################---
-## 3.3 Estimate the bias term on one subsample ----
+## 2.3 Estimate the bias term on one subsample ----
 #########################################################---
 Bhat <- function(theta, Xs, ys, model) {
   
@@ -174,7 +171,7 @@ Bhat <- function(theta, Xs, ys, model) {
 }
 
 #########################################################---
-## 3.4 Adjusted estimating equation ----
+## 2.4 Estimating equation ----
 #########################################################---
 AdjustedScore <- function(theta, Xs, ys, model) {
   
@@ -194,7 +191,7 @@ AdjustedScore <- function(theta, Xs, ys, model) {
 }
 
 #########################################################---
-## 3.5 Solve the adjusted estimating equation ----
+## 2.5 Solve the estimating equation ----
 #########################################################---
 SolveBCEquation <- function(theta_start, Xs, ys, model) {
   
@@ -234,7 +231,7 @@ SolveBCEquation <- function(theta_start, Xs, ys, model) {
 }
 
 #########################################################---
-## 3.6 Calculate the full-data asymptotic standard deviation ----
+## 2.6 Calculate the full-data asymptotic standard deviation ----
 #########################################################---
 CalculateASD <- function(X, y, true_theta, model) {
   
@@ -259,7 +256,7 @@ CalculateASD <- function(X, y, true_theta, model) {
 }
 
 #########################################################---
-## 3.7 Calculate the subbagging standard error ----
+## 2.7 Calculate the subbagging standard error ----
 #########################################################---
 CalculateSSE <- function(theta_subsample, N, k_N) {
   
@@ -282,7 +279,7 @@ CalculateSSE <- function(theta_subsample, N, k_N) {
 }
 
 #########################################################---
-## 3.8 Format numbers used in the output filename ----
+## 2.8 Format numbers used in the output filename ----
 #########################################################---
 PlainNumber <- function(x) {
   x <- format(x, scientific = FALSE, trim = TRUE)
@@ -290,7 +287,7 @@ PlainNumber <- function(x) {
 }
 
 #########################################################---
-# 4. Output filename ----
+# 3. Formatting on the output filename ----
 #########################################################---
 file_name <- paste0(
   "simulation_",
@@ -306,7 +303,7 @@ file_name <- paste0(
 file_path <- file.path(output_dir, file_name)
 
 #########################################################---
-# 5. Main simulation loop ----
+# 4. Main simulation loop ----
 #########################################################---
 for (r in seq_len(R)) {
   
@@ -314,7 +311,7 @@ for (r in seq_len(R)) {
   set.seed(seed_r)
   
   #########################################################---
-  ## 5.1 Generate one full dataset ----
+  ## 4.1 Generate one full dataset ----
   #########################################################---
   p <- length(true_theta) - 1
   
@@ -340,9 +337,9 @@ for (r in seq_len(R)) {
     y <- rbinom(N, size = 1, prob = probability)
   }
   
-  #########################################################---
-  ## 5.2 Full-data ASD evaluated at the true parameter ----
-  #########################################################---
+  ########################################################---
+  # 4.2 Full-data ASD evaluated at the true parameter ----
+  ########################################################---
   asd <- CalculateASD(
     X = X,
     y = y,
@@ -350,9 +347,9 @@ for (r in seq_len(R)) {
     model = model
   )
   
-  #########################################################---
-  ## 5.3 Storage for the selected subbagging estimator ----
-  #########################################################---
+  ########################################################---
+  # 4.3 Storage for the selected subbagging estimator ----
+  ########################################################---
   coefficient_names <- colnames(X)
   d <- ncol(X)
   
@@ -366,18 +363,18 @@ for (r in seq_len(R)) {
   bad_draws <- 0
   total_draws <- 0
   
-  #########################################################---
-  ## 5.4 Start timing the selected subbagging method ----
-  #########################################################---
+  ########################################################---
+  # 4.4 Start timing the selected subbagging method ----
+  ########################################################---
   ## Resetting the seed ensures that separate runs of the
   ## three methods use the same sequence of subsamples.
   set.seed(seed_r)
   
   time_start <- proc.time()[["elapsed"]]
   
-  #########################################################---
-  ## 5.5 Draw and process m_N valid subsamples ----
-  #########################################################---
+  ########################################################---
+  # 4.5 Draw and process m_N valid subsamples ----
+  ########################################################---
   for (b in seq_len(m_N)) {
     
     valid_draw <- FALSE
@@ -395,9 +392,9 @@ for (r in seq_len(R)) {
       Xs <- X[subsample_id, , drop = FALSE]
       ys <- y[subsample_id]
       
-      #########################################################---
-      ### 5.5.1 Apply the selected estimator to this subsample ----
-      #########################################################---
+    #########################################################---
+    ## 4.5.1 Apply the selected estimator to this subsample ----
+    #########################################################---
       theta_result <- try({
         
         theta_hat <- FitTheta(Xs, ys, model)
@@ -424,7 +421,7 @@ for (r in seq_len(R)) {
       }, silent = TRUE)
       
       #########################################################---
-      ### 5.5.2 Redraw only when the selected estimator fails ----
+      ## 4.5.2 Redraw only when the selected estimator fails ----
       #########################################################---
       if (inherits(theta_result, "try-error")) {
         bad_draws <- bad_draws + 1
@@ -437,18 +434,18 @@ for (r in seq_len(R)) {
   }
   
   #########################################################---
-  ## 5.6 Average the m_N subsample estimates ----
+  ## 4.6 Average the m_N subsample estimates ----
   #########################################################---
   estimate <- colMeans(theta_subsample)
   
   #########################################################---
-  ## 5.7 End timing ----
+  ## 4.7 End timing ----
   #########################################################---
   time_end <- proc.time()[["elapsed"]]
   time_total_seconds <- time_end - time_start
   
   #########################################################---
-  ## 5.8 Calculate SSE and variance-inflation adjustments ----
+  ## 4.8 Calculate SSE and variance-inflation adjustments ----
   #########################################################---
   sse <- CalculateSSE(
     theta_subsample = theta_subsample,
@@ -461,7 +458,7 @@ for (r in seq_len(R)) {
   adjusted_sse <- adjustment_factor * sse
   
   #########################################################---
-  ## 5.9 Save this replication ----
+  ## 4.9 Save this replication ----
   #########################################################---
   result <- data.frame(
     replication = r,
@@ -522,7 +519,7 @@ for (r in seq_len(R)) {
 }
 
 #########################################################---
-# 6. Completion message ----
+# 5. Completion message ----
 #########################################################---
 cat("\nSimulation completed.\n")
 cat("Output file:", file_path, "\n")
