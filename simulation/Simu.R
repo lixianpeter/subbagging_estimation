@@ -279,16 +279,14 @@ CalculateSSE <- function(theta_subsample, N, k_N) {
 }
 
 #########################################################---
-## 2.8 Format numbers used in the output filename ----
+# 3 Format numbers used in the output filename ----
 #########################################################---
 PlainNumber <- function(x) {
   x <- format(x, scientific = FALSE, trim = TRUE)
   gsub("\\.", "p", x)
 }
 
-#########################################################---
-# 3. Formatting on the output filename ----
-#########################################################---
+## Output file name
 file_name <- paste0(
   "simulation_",
   "model=", model,
@@ -392,9 +390,9 @@ for (r in seq_len(R)) {
       Xs <- X[subsample_id, , drop = FALSE]
       ys <- y[subsample_id]
       
-    #########################################################---
-    ## 4.5.1 Apply the selected estimator to this subsample ----
-    #########################################################---
+      #########################################################---
+      ## 4.5.1 Apply the selected estimator to this subsample ----
+      #########################################################---
       theta_result <- try({
         
         theta_hat <- FitTheta(Xs, ys, model)
@@ -506,16 +504,8 @@ for (r in seq_len(R)) {
     quote = FALSE
   )
   
-  cat(
-    "Finished replication", r,
-    "| seed:", seed_r,
-    "| model:", model,
-    "| method:", method,
-    "| bad draws:", bad_draws,
-    "| total draws:", total_draws,
-    "| time:", round(time_total_seconds, 4),
-    "seconds\n"
-  )
+  cat("Replication", r, "out of", R, "\n")
+  flush.console()
 }
 
 #########################################################---
@@ -523,4 +513,3 @@ for (r in seq_len(R)) {
 #########################################################---
 cat("\nSimulation completed.\n")
 cat("Output file:", file_path, "\n")
-
